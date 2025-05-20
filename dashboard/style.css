@@ -1,1 +1,7 @@
-
+.card--government { border-left-color: #00c4b4; }  /* teal */
+.card--mainstream { border-left-color: #4fc3f7; }
+.card--right { border-left-color: #e53935; }      /* red */
+.card--left { border-left-color: #1e88e5; }       /* blue */
+.card--health { border-left-color: #81c784; }
+.card--science { border-left-color: #fdd835; }
+.card--security { border-left-color: #e57373; }
