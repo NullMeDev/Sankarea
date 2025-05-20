@@ -1,1 +1,42 @@
+name: Go News Feed
 
+on:
+  schedule:
+    - cron: '*/24 * * * *'
+  workflow_dispatch:
+
+jobs:
+  build-run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Setup Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: 1.21
+
+      - name: Cache state
+        uses: actions/cache@v3
+        with:
+          path: data/state.json
+          key: state-${{ runner.os }}
+
+      - name: Build
+        run: go build -o newsbot ./cmd/newsbot
+
+      - name: Run
+        run: |
+          ./newsbot --config config/sources.yml --state data/state.json --max 6
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          DISCORD_WEBHOOKS: ${{ secrets.DISCORD_WEBHOOKS }}
+          GOOGLE_FACTCHECK_API_KEY: ${{ secrets.GOOGLE_FACTCHECK_API_KEY }}
+          CLAIMBUSTER_API_KEY: ${{ secrets.CLAIMBUSTER_API_KEY }}
+
+      - name: Save state
+        uses: actions/upload-artifact@v3
+        with:
+          name: state
+          path: data/state.json
