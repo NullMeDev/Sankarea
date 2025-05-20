@@ -10,33 +10,42 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+      - uses: actions/checkout@v3
 
       - name: Setup Go
         uses: actions/setup-go@v4
         with:
           go-version: 1.21
 
-      - name: Cache Sankarea state
+      - name: Cache state
         uses: actions/cache@v3
         with:
           path: data/state.json
           key: state-${{ runner.os }}
 
-      - name: Build Sankarea binary
-        run: go build -o sankarea ./cmd/newsbot
+      - name: Build
+        run: go build -o newsbot ./cmd/newsbot
 
-      - name: Run Sankarea bot
-        run: ./sankarea --config config/sources.yml --state data/state.json --max 6
+      - name: Register slash commands
+        run: |
+          go run tools/register_slash.go \
+            --app ${{ secrets.DISCORD_APPLICATION_ID }} \
+            --guild ${{ secrets.DISCORD_GUILD_ID }}
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          DISCORD_WEBHOOKS: ${{ secrets.DISCORD_WEBHOOKS }}
-          GOOGLE_FACTCHECK_API_KEY: ${{ secrets.GOOGLE_FACTCHECK_API_KEY }}
-          CLAIMBUSTER_API_KEY: ${{ secrets.CLAIMBUSTER_API_KEY }}
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
 
-      - name: Upload Sankarea state
+      - name: Run News Feed Bot
+        run: |
+          ./newsbot --config config/sources.yml --state data/state.json --max 6
+        env:
+          OPENAI_API_KEY:      ${{ secrets.OPENAI_API_KEY }}
+          DISCORD_BOT_TOKEN:   ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_CHANNEL_ID:  ${{ secrets.DISCORD_CHANNEL_ID }}
+          COMMAND_TOKEN:       ${{ secrets.COMMAND_TOKEN }}
+          ALERT_MENTION:       ${{ secrets.ALERT_MENTION }}
+
+      - name: Save state
         uses: actions/upload-artifact@v3
         with:
-          name: sankarea-state
+          name: state
           path: data/state.json
