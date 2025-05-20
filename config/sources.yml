@@ -1,1 +1,15 @@
-
+rss:
+  - name: USA.gov Latest
+    url: https://www.usa.gov/feed
+    tags: [government]
+  - name: White House News
+    url: https://www.whitehouse.gov/briefing-room/statements-releases/feed/
+    tags: [government]
+  - name: CNN Politics
+    url: https://rss.cnn.com/rss/cnn_allpolitics.rss
+    tags: [mainstream]
+html:
+  - name: USA.gov Homepage
+    url: https://www.usa.gov
+    selector: "article"
+    tags: [government]
