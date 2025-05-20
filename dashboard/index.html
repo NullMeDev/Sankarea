@@ -1,1 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Sankarea News Dashboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>Sankarea Dashboard</h1>
+    <p class="subtitle">Live summary of political news and fact-checking</p>
+  </header>
 
+  <main>
+    <section id="filters">
+      <input type="text" id="search" placeholder="Search keywords or tags">
+      <select id="sentiment">
+        <option value="">All Sentiments</option>
+        <option value="Positive">Positive</option>
+        <option value="Negative">Negative</option>
+        <option value="Neutral">Neutral</option>
+      </select>
+    </section>
+
+    <section id="news-container">
+      <!-- Articles dynamically inserted -->
+    </section>
+  </main>
+
+  <footer>
+    <p>&copy; 2024 Sankarea AI | Powered by Go + OpenAI + GitHub Actions</p>
+  </footer>
+
+  <script src="dashboard.js"></script>
+</body>
+</html>
