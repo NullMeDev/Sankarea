@@ -36,7 +36,7 @@ jobs:
           CLAIMBUSTER_API_KEY: ${{ secrets.CLAIMBUSTER_API_KEY }}
 
       - name: Upload Sankarea state
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v3.1.2
         with:
           name: sankarea-state
           path: data/state.json
