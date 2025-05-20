@@ -18,16 +18,16 @@ jobs:
         with:
           go-version: 1.21
 
-      - name: Cache state
+      - name: Cache Sankarea state
         uses: actions/cache@v3
         with:
           path: data/state.json
           key: state-${{ runner.os }}
 
-      - name: Build Sankarea
+      - name: Build Sankarea binary
         run: go build -o sankarea ./cmd/newsbot
 
-      - name: Run Sankarea
+      - name: Run Sankarea bot
         run: ./sankarea --config config/sources.yml --state data/state.json --max 6
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -35,8 +35,8 @@ jobs:
           GOOGLE_FACTCHECK_API_KEY: ${{ secrets.GOOGLE_FACTCHECK_API_KEY }}
           CLAIMBUSTER_API_KEY: ${{ secrets.CLAIMBUSTER_API_KEY }}
 
-      - name: Upload state
+      - name: Upload Sankarea state
         uses: actions/upload-artifact@v3
         with:
-          name: state
+          name: sankarea-state
           path: data/state.json
