@@ -2,7 +2,7 @@ name: Sankarea News Feed
 
 on:
   schedule:
-    - cron: '*/24 * * * *'
+    - cron: '*/24 * * * *'   # every 24 minutes
   workflow_dispatch:
 
 jobs:
@@ -33,8 +33,4 @@ jobs:
           OPENAI_API_KEY:   ${{ secrets.OPENAI_API_KEY }}
           DISCORD_WEBHOOKS: ${{ secrets.DISCORD_WEBHOOKS }}
 
-      - name: Upload new state
-        uses: actions/upload-artifact@v3
-        with:
-          name: state
-          path: data/state.json
+      # ← Removed the upload-artifact step entirely
