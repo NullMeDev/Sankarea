@@ -10,7 +10,8 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v3
 
       - name: Setup Go
         uses: actions/setup-go@v4
@@ -24,7 +25,9 @@ jobs:
           key: state-${{ runner.os }}
 
       - name: Build
-        run: go build -o sankarea ./cmd/sankarea
+        run: |
+          go mod tidy
+          go build -o sankarea ./cmd/sankarea
 
       - name: Run Sankarea
         run: |
@@ -32,5 +35,3 @@ jobs:
         env:
           OPENAI_API_KEY:   ${{ secrets.OPENAI_API_KEY }}
           DISCORD_WEBHOOKS: ${{ secrets.DISCORD_WEBHOOKS }}
-
-      # ← Removed the upload-artifact step entirely
