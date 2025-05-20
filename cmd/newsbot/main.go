@@ -136,3 +136,49 @@ return string(b)
 
 func postDiscord(payload string) { webhooks := strings.Split(os.Getenv("DISCORD_WEBHOOKS"), ",") for _, hook := range webhooks { http.Post(hook, "application/json", strings.NewReader(payload)) } }
 
+// Add at the bottom of main.go
+
+func init() { go startCommandServer() }
+
+func startCommandServer() { http.HandleFunc("/command", handleCommand) port := os.Getenv("COMMAND_PORT") if port == "" { port = "9010" } log.Println("Sankarea command server listening on port", port) http.ListenAndServe(":"+port, nil) }
+
+func handleCommand(w http.ResponseWriter, r *http.Request) { if r.Method != http.MethodPost { http.Error(w, "Invalid method", http.StatusMethodNotAllowed) return } token := r.Header.Get("Authorization") if token != os.Getenv("COMMAND_TOKEN") { http.Error(w, "Unauthorized", http.StatusUnauthorized) return }
+
+type Cmd struct {
+	Command string `json:"command"`
+	Value   string `json:"value"`
+}
+var cmd Cmd
+json.NewDecoder(r.Body).Decode(&cmd)
+
+path := "config/alert_tags.json"
+var conf struct {
+	AlertTags   []string `json:"alert_tags"`
+	AlertTarget string   `json:"alert_target"`
+}
+data, _ := ioutil.ReadFile(path)
+json.Unmarshal(data, &conf)
+
+switch cmd.Command {
+case "addtag":
+	conf.AlertTags = appendIfMissing(conf.AlertTags, cmd.Value)
+case "removetag":
+	conf.AlertTags = removeTag(conf.AlertTags, cmd.Value)
+case "listtags":
+	json.NewEncoder(w).Encode(conf.AlertTags)
+	return
+default:
+	http.Error(w, "Invalid command", http.StatusBadRequest)
+	return
+}
+
+save, _ := json.MarshalIndent(conf, "", "  ")
+ioutil.WriteFile(path, save, 0644)
+w.Write([]byte("Success"))
+
+}
+
+func appendIfMissing(slice []string, val string) []string { for _, item := range slice { if strings.ToLower(item) == strings.ToLower(val) { return slice } } return append(slice, val) }
+
+func removeTag(slice []string, val string) []string { var out []string for _, item := range slice { if strings.ToLower(item) != strings.ToLower(val) { out = append(out, item) } } return out }
+
