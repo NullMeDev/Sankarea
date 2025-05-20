@@ -2,7 +2,7 @@ name: Sankarea News Feed
 
 on:
   schedule:
-    - cron: '*/24 * * * *'   # every 24 minutes
+    - cron: '*/24 * * * *'
   workflow_dispatch:
 
 jobs:
