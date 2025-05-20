@@ -1,9 +1,17 @@
+name: Go News Feed
+
+on:
+  schedule:
+    - cron: '*/24 * * * *'
+  workflow_dispatch:
+
 jobs:
   build-run:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v3
 
       - name: Setup Go
         uses: actions/setup-go@v4
@@ -16,12 +24,11 @@ jobs:
           path: data/state.json
           key: state-${{ runner.os }}
 
-      - name: Build
+      - name: Build Sankarea
         run: go build -o sankarea ./cmd/newsbot
 
       - name: Run Sankarea
-        run: |
-          ./sankarea --config config/sources.yml --state data/state.json --max 6
+        run: ./sankarea --config config/sources.yml --state data/state.json --max 6
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           DISCORD_WEBHOOKS: ${{ secrets.DISCORD_WEBHOOKS }}
