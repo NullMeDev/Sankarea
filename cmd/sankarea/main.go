@@ -48,14 +48,14 @@ type State struct {
 
 func main() {
     cfgPath := flag.String("config", "config/sources.yml", "")
-    stPath := flag.String("state", "data/state.json", "")
+    stPath  := flag.String("state",  "data/state.json", "")
     flag.Parse()
 
     log.SetFlags(log.LstdFlags | log.Lshortfile)
     cfg := loadConfig(*cfgPath)
-    st := loadState(*stPath)
+    st  := loadState(*stPath)
     client := openai.NewClient(os.Getenv("OPENAI_API_KEY"))
-    httpc := &http.Client{Timeout: 15 * time.Second}
+    httpc  := &http.Client{Timeout: 15 * time.Second}
 
     items := fetchAll(cfg, httpc)
     newItems := filterNew(items, st)
@@ -124,4 +124,111 @@ func main() {
     saveState(*stPath, st)
 }
 
-// … helper functions (loadConfig, loadState, saveState, fetchAll, fetchRSS, fetchHTML, filterNew) unchanged …
+func loadConfig(path string) *Config {
+    b, err := ioutil.ReadFile(path)
+    if err != nil {
+        log.Fatalf("read config: %v", err)
+    }
+    var c Config
+    if err := yaml.Unmarshal(b, &c); err != nil {
+        log.Fatalf("parse config: %v", err)
+    }
+    return &c
+}
+
+func loadState(path string) *State {
+    st := &State{Seen: make(map[string]time.Time)}
+    if b, err := ioutil.ReadFile(path); err == nil {
+        json.Unmarshal(b, st)
+    }
+    return st
+}
+
+func saveState(path string, st *State) {
+    os.MkdirAll("data", 0755)
+    b, _ := json.MarshalIndent(st, "", "  ")
+    ioutil.WriteFile(path, b, 0644)
+}
+
+func fetchAll(cfg *Config, httpc *http.Client) []Item {
+    var all []Item
+    for _, src := range cfg.RSS {
+        all = append(all, fetchRSS(src, httpc)...)
+    }
+    for _, src := range cfg.HTML {
+        all = append(all, fetchHTML(src, httpc)...)
+    }
+    return all
+}
+
+func fetchRSS(src Source, httpc *http.Client) []Item {
+    resp, err := httpc.Get(src.URL)
+    if err != nil {
+        log.Printf("rss %s error: %v", src.Name, err)
+        return nil
+    }
+    defer resp.Body.Close()
+    doc, err := goquery.NewDocumentFromReader(resp.Body)
+    if err != nil {
+        log.Printf("rss parse %s: %v", src.Name, err)
+        return nil
+    }
+    var out []Item
+    doc.Find("item").Each(func(_ int, s *goquery.Selection) {
+        title := s.Find("title").Text()
+        link  := s.Find("link").Text()
+        desc  := s.Find("description").Text()
+        hash  := fmt.Sprintf("%x", md5.Sum([]byte(title+link)))
+        out = append(out, Item{
+            Hash:    hash,
+            Title:   strings.TrimSpace(title),
+            URL:     strings.TrimSpace(link),
+            Body:    desc,
+            Tags:    src.Tags,
+            Fetched: time.Now(),
+        })
+    })
+    return out
+}
+
+func fetchHTML(src Source, httpc *http.Client) []Item {
+    resp, err := httpc.Get(src.URL)
+    if err != nil {
+        log.Printf("html %s error: %v", src.Name, err)
+        return nil
+    }
+    defer resp.Body.Close()
+    doc, err := goquery.NewDocumentFromReader(resp.Body)
+    if err != nil {
+        log.Printf("html parse %s: %v", src.Name, err)
+        return nil
+    }
+    var out []Item
+    doc.Find(src.Selector).Each(func(_ int, s *goquery.Selection) {
+        title := s.Find("a").Text()
+        link, _ := s.Find("a").Attr("href")
+        if !strings.HasPrefix(link, "http") {
+            link = src.URL + link
+        }
+        hash := fmt.Sprintf("%x", md5.Sum([]byte(title+link)))
+        out = append(out, Item{
+            Hash:    hash,
+            Title:   strings.TrimSpace(title),
+            URL:     strings.TrimSpace(link),
+            Body:    s.Text(),
+            Tags:    src.Tags,
+            Fetched: time.Now(),
+        })
+    })
+    return out
+}
+
+func filterNew(items []Item, st *State) []Item {
+    var out []Item
+    for _, it := range items {
+        if _, seen := st.Seen[it.Hash]; !seen {
+            out = append(out, it)
+        }
+    }
+    return out
+}
