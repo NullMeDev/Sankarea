@@ -55,6 +55,7 @@ var (
     discordOwnerID    string
     discordGuildID    string
     cooldowns         = make(map[string]time.Time)
+    startTime         = time.Now()
 )
 
 const (
@@ -63,6 +64,7 @@ const (
     sourcesFilePath  = "config/sources.yml"
     stateFilePath    = "data/state.json"
 )
+
 func getEnvOrFail(key string) string {
     v := os.Getenv(key)
     if v == "" {
@@ -228,6 +230,7 @@ func updateCronJob(minutes int) {
     saveConfig(currentConfig)
     saveState(state)
 }
+
 // === Moderation/Admin Checks ===
 func isAdminOrOwner(i *discordgo.InteractionCreate) bool {
     if i.GuildID != "" && discordOwnerID != "" && i.Member.User.ID == discordOwnerID {
@@ -277,274 +280,7 @@ func factCheck(claim string) string {
     // See TODOs for extension
     return fmt.Sprintf("Fact-check for '%s':\n[TODO: Integrate fact-check APIs.]", claim)
 }
-// === Slash Command Handler (core pattern) ===
-func handleCommands(s *discordgo.Session, i *discordgo.InteractionCreate) {
-    defer logPanic()
-    name := i.ApplicationCommandData().Name
-    userID := i.Member.User.ID
 
-    if !enforceCooldown(userID, name) {
-        s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-            Type: discordgo.InteractionResponseChannelMessageWithSource,
-            Data: &discordgo.InteractionResponseData{
-                Content: "Slow down. Try again in a moment.",
-                Flags:   1 << 6,
-            },
-        })
-        return
-    }
-
-    switch name {
-    case "ping":
-        s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-            Type: discordgo.InteractionResponseChannelMessageWithSource,
-            Data: &discordgo.InteractionResponseData{
-                Content: "Pong!",
-            },
-        })
-    case "status", "uptime":
-        paused := "No"
-        if state.Paused {
-            paused = "Yes"
-        }
-        summary := fmt.Sprintf("News posting paused: **%s**\nFeeds enabled: **%d**\nCurrent interval: **%d minutes**\nNext post: **%s**\nLockdown: **%v**\nUptime: **%s**",
-            paused, state.FeedCount, state.LastInterval, state.NewsNextTime.Format(time.RFC1123), state.Lockdown, getUptime())
-        s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-            Type: discordgo.InteractionResponseChannelMessageWithSource,
-            Data: &discordgo.InteractionResponseData{
-                Content: summary,
-            },
-        })
-    case "setnewsinterval":
-        if !isAdminOrOwner(i) {
-            s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-                Type: discordgo.InteractionResponseChannelMessageWithSource,
-                Data: &discordgo.InteractionResponseData{
-                    Content: "Weeb, You Do Not Have The Right Privileges.",
-                },
-            })
-            return
-        }
-        mins := int(i.ApplicationCommandData().Options[0].IntValue())
-        if mins < 15 || mins > 360 {
-            s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-                Type: discordgo.InteractionResponseChannelMessageWithSource,
-                Data: &discordgo.InteractionResponseData{
-                    Content: "Interval must be between 15 and 360 minutes.",
-                    Flags:   1 << 6,
-                },
-            })
-            return
-        }
-        updateCronJob(mins)
-        logAudit("IntervalChange", fmt.Sprintf("By <@%s>: Now every %d min", userID, mins), 0xffcc00)
-        s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-            Type: discordgo.InteractionResponseChannelMessageWithSource,
-            Data: &discordgo.InteractionResponseData{
-                Content: fmt.Sprintf("News interval updated to %d minutes.", mins),
-            },
-        })
-    case "nullshutdown":
-        if !isAdminOrOwner(i) {
-            s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-                Type: discordgo.InteractionResponseChannelMessageWithSource,
-                Data: &discordgo.InteractionResponseData{
-                    Content: "Weeb, You Do Not Have The Right Privileges.",
-                },
-            })
-            return
-        }
-        s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-            Type: discordgo.InteractionResponseChannelMessageWithSource,
-            Data: &discordgo.InteractionResponseData{
-                Content: "Shutting down bot. Goodbye.",
-            },
-        })
-        logAudit("Shutdown", fmt.Sprintf("Shutdown requested by <@%s>", userID), 0xff0000)
-        os.Exit(0)
-    case "nullrestart":
-        if !isAdminOrOwner(i) {
-            s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-                Type: discordgo.InteractionResponseChannelMessageWithSource,
-                Data: &discordgo.InteractionResponseData{
-                    Content: "Weeb, You Do Not Have The Right Privileges.",
-                },
-            })
-            return
-        }
-        s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-            Type: discordgo.InteractionResponseChannelMessageWithSource,
-            Data: &discordgo.InteractionResponseData{
-                Content: "Restarting bot...",
-            },
-        })
-        logAudit("Restart", fmt.Sprintf("Restart requested by <@%s>", userID), 0xffcc00)
-        os.Exit(42) // Use a runner script to handle 42 as a restart
-
-    case "version":
-        s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-            Type: discordgo.InteractionResponseChannelMessageWithSource,
-            Data: &discordgo.InteractionResponseData{
-                Content: "Sankarea Bot Version: 1.0.0", // Update as needed
-            },
-        })
-    case "reloadconfig":
-        if !isAdminOrOwner(i) {
-            s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-                Type: discordgo.InteractionResponseChannelMessageWithSource,
-                Data: &discordgo.InteractionResponseData{
-                    Content: "Weeb, You Do Not Have The Right Privileges.",
-                },
-            })
-            return
-        }
-        newConfig, err := loadConfig()
-        if err != nil {
-            logAudit("ReloadConfigError", err.Error(), 0xff0000)
-            s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-                Type: discordgo.InteractionResponseChannelMessageWithSource,
-                Data: &discordgo.InteractionResponseData{
-                    Content: "Error reloading config.",
-                },
-            })
-            return
-        }
-        currentConfig = newConfig
-        logAudit("ReloadConfig", fmt.Sprintf("Reloaded config by <@%s>", userID), 0x00ff00)
-        s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-            Type: discordgo.InteractionResponseChannelMessageWithSource,
-            Data: &discordgo.InteractionResponseData{
-                Content: "Config reloaded.",
-            },
-        })
-    case "health":
-        health := checkHealth()
-        s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-            Type: discordgo.InteractionResponseChannelMessageWithSource,
-            Data: &discordgo.InteractionResponseData{
-                Content: health,
-            },
-        })
-    // TODO: Add your other moderation and feed management commands here.
-    }
-}
-
-// Uptime/Health Helpers
-var startTime = time.Now()
-
-func getUptime() string {
-    dur := time.Since(startTime)
-    return dur.Truncate(time.Second).String()
-}
-
-// Health status check (can expand)
-func checkHealth() string {
-    // Ping Discord, check APIs, report last error
-    return fmt.Sprintf("Bot is healthy. Last error: %s", state.LastError)
-}
-
-// === Main with Panic Protection and Startup Logging ===
-func main() {
-    defer logPanic()
-    fmt.Println("Sankarea bot starting up...")
-
-    fileMustExist("config/config.json")
-    fileMustExist("config/sources.yml")
-    fileMustExist("data/state.json")
-
-    discordBotToken := getEnvOrFail("DISCORD_BOT_TOKEN")
-    discordAppID := getEnvOrFail("DISCORD_APPLICATION_ID")
-    discordGuildID = getEnvOrFail("DISCORD_GUILD_ID")
-    discordChannelID = getEnvOrFail("DISCORD_CHANNEL_ID")
-
-    var err error
-    sources, err = loadSources()
-    if err != nil {
-        log.Fatalf("Failed to load sources.yml: %v", err)
-    }
-    currentConfig, err = loadConfig()
-    if err != nil {
-        log.Fatalf("Failed to load config.json: %v", err)
-    }
-    auditLogChannelID = currentConfig.AuditLogChannelID
-
-    state, _ = loadState()
-
-    dg, err = discordgo.New("Bot " + discordBotToken)
-    if err != nil {
-        log.Fatalf("Error creating Discord session: %v", err)
-    }
-
-    guild, err := dg.Guild(discordGuildID)
-    if err == nil {
-        discordOwnerID = guild.OwnerID
-    } else {
-        discordOwnerID = ""
-    }
-
-    dg.AddHandler(func(s *discordgo.Session, i *discordgo.InteractionCreate) {
-        handleCommands(s, i)
-    })
-
-    err = dg.Open()
-    if err != nil {
-        log.Fatalf("Error opening connection to Discord: %v", err)
-    }
-    defer dg.Close()
-
-    _, err = dg.ChannelMessageSend(discordChannelID, "🟢 Sankarea bot is online and ready. Use /setnewsinterval to control posting frequency.")
-    if err != nil {
-        log.Printf("Failed to send startup message: %v", err)
-    }
-
-    cronJob = cron.New()
-    var minutes int
-    _, err = fmt.Sscanf(currentConfig.News15MinCron, "*/%d * * * *", &minutes)
-    if err != nil || minutes < 15 || minutes > 360 {
-        minutes = 15
-    }
-    updateCronJob(minutes)
-    cronJob.Start()
-    fetchAndPostNews(dg, discordChannelID, sources)
-
-    go backupScheduler()
-
-    fmt.Println("Sankarea bot is running. Press CTRL+C to exit.")
-    stop := make(chan os.Signal, 1)
-    signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
-    <-stop
-    fmt.Println("Sankarea bot shutting down...")
-}
-
-// === Scheduled Backup Routine ===
-func backupScheduler() {
-    for {
-        now := time.Now()
-        backupName := fmt.Sprintf("backup_%s.json", now.Format("20060102_150405"))
-        ioutil.WriteFile("data/"+backupName, []byte(fmt.Sprintf("Config: %+v\nState: %+v", currentConfig, state)), 0644)
-        // Keep only last 7 backups
-        files, _ := ioutil.ReadDir("data")
-        var backups []os.FileInfo
-        for _, f := range files {
-            if len(f.Name()) > 7 && f.Name()[:7] == "backup_" {
-                backups = append(backups, f)
-            }
-        }
-        if len(backups) > 7 {
-            for _, old := range backups[:len(backups)-7] {
-                os.Remove("data/" + old.Name())
-            }
-        }
-        time.Sleep(24 * time.Hour)
-    }
-}
-
-// === TODOs and Future Extensions ===
-// TODO: Implement all missing admin/moderation commands (/kick, /ban, user picker, etc)
-// TODO: Integrate ClaimBuster/Google Fact Check API
-// TODO: Improve health check to actually ping each integrated API
-// TODO: Add configurable roles/permissions for custom admin levels
-// TODO: Support for dynamic news feeds in real time
 // === Slash Command Handler (core pattern) ===
 func handleCommands(s *discordgo.Session, i *discordgo.InteractionCreate) {
     defer logPanic()
@@ -832,11 +568,11 @@ func handleCommands(s *discordgo.Session, i *discordgo.InteractionCreate) {
 
     // === Uptime ===
     case "uptime":
-        uptime := time.Since(state.NewsNextTime.Add(-parseCron(currentConfig.News15MinCron)))
+        uptime := time.Since(startTime)
         s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
             Type: discordgo.InteractionResponseChannelMessageWithSource,
             Data: &discordgo.InteractionResponseData{
-                Content: fmt.Sprintf("Uptime: %s", uptime),
+                Content: fmt.Sprintf("Uptime: %s", uptime.Truncate(time.Second)),
             },
         })
 
@@ -904,12 +640,6 @@ func handleCommands(s *discordgo.Session, i *discordgo.InteractionCreate) {
             },
         })
     }
-}
-// === Uptime Helper ===
-var startTime = time.Now()
-
-func getUptime() string {
-    return time.Since(startTime).Truncate(time.Second).String()
 }
 
 // Health status check (can expand)
@@ -1012,8 +742,3 @@ func main() {
     <-stop
     fmt.Println("Sankarea bot shutting down...")
 }
-
-// === TODOs and Future Extensions ===
-// TODO: Expand admin/mod commands, improve error reporting, support dynamic feeds, etc.
-// TODO: Integrate fact-checking APIs for real-time validation.
-// TODO: Add more user/admin feedback and utility features as desired.
