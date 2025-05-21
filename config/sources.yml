@@ -8,9 +8,6 @@
 - name: "BBC"
   url: "http://feeds.bbci.co.uk/news/rss.xml"
   bias: "center-left"
-- name: "Reuters (Top News)"
-  url: "http://feeds.reuters.com/reuters/topNews"
-  bias: "center"
 
 # Center / Mainstream
 - name: "AP"
@@ -24,23 +21,12 @@
   bias: "center"
 
 # Right-Leaning
-- name: "Fox News"
-  url: "http://feeds.foxnews.com/foxnews/latest"
-  bias: "right"
 - name: "The Washington Times"
   url: "https://www.washingtontimes.com/rss/headlines/news/"
   bias: "right"
 - name: "New York Post"
   url: "https://nypost.com/feed/"
   bias: "right"
-
-# Middle/Nonpartisan
-- name: "Reuters (again)"
-  url: "http://feeds.reuters.com/reuters/topNews"
-  bias: "center"
-- name: "NPR (again)"
-  url: "https://www.npr.org/rss/rss.php?id=1001"
-  bias: "center-left"
 
 # US Government
 - name: "USA.gov News"
