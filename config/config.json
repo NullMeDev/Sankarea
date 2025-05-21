@@ -1,3 +1,4 @@
 {
-  "news15MinCron": "*/15 * * * *"
+  "news15MinCron": "*/15 * * * *",
+  "auditLogChannelId": "YOUR_DISCORD_CHANNEL_ID"
 }
