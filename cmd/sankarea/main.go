@@ -73,7 +73,10 @@ func fetchAndPostNews(dg *discordgo.Session, channelID string, sources []Source)
         if len(feed.Items) == 0 {
             continue
         }
-        msg := fmt.Sprintf("**[%s] Top headline:**\n[%s](%s)", src.Name, feed.Items[0].Title, feed.Items[0].Link)
+        msg := fmt.Sprintf(
+            "**[%s]** *(bias: %s)*\n[%s](%s)",
+            src.Name, src.Bias, feed.Items[0].Title, feed.Items[0].Link,
+        )
         _, err = dg.ChannelMessageSend(channelID, msg)
         if err != nil {
             log.Printf("Failed to post news for %s: %v", src.Name, err)
