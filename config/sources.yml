@@ -1,12 +1,54 @@
-- name: Reuters
-  url: https://www.reuters.com/rssFeed
-  bias: center
-- name: Fox News
-  url: https://www.foxnews.com/about/rss
-  bias: right
-- name: CNN
-  url: https://www.cnn.com/rss
-  bias: left
-- name: CDC
-  url: https://tools.cdc.gov/api/v2/resources/media/404952.rss
-  bias: gov
+# Left-Leaning / Center-Left
+- name: "NPR"
+  url: "https://www.npr.org/rss/rss.php?id=1001"
+  bias: "left"
+- name: "The Guardian"
+  url: "https://www.theguardian.com/world/rss"
+  bias: "left"
+- name: "BBC"
+  url: "http://feeds.bbci.co.uk/news/rss.xml"
+  bias: "center-left"
+- name: "Reuters (Top News)"
+  url: "http://feeds.reuters.com/reuters/topNews"
+  bias: "center"
+
+# Center / Mainstream
+- name: "AP"
+  url: "https://apnews.com/rss"
+  bias: "center"
+- name: "PBS NewsHour"
+  url: "https://www.pbs.org/newshour/feeds/rss/headlines"
+  bias: "center"
+- name: "USA Today"
+  url: "http://rssfeeds.usatoday.com/usatoday-NewsTopStories"
+  bias: "center"
+
+# Right-Leaning
+- name: "Fox News"
+  url: "http://feeds.foxnews.com/foxnews/latest"
+  bias: "right"
+- name: "The Washington Times"
+  url: "https://www.washingtontimes.com/rss/headlines/news/"
+  bias: "right"
+- name: "New York Post"
+  url: "https://nypost.com/feed/"
+  bias: "right"
+
+# Middle/Nonpartisan
+- name: "Reuters (again)"
+  url: "http://feeds.reuters.com/reuters/topNews"
+  bias: "center"
+- name: "NPR (again)"
+  url: "https://www.npr.org/rss/rss.php?id=1001"
+  bias: "center-left"
+
+# US Government
+- name: "USA.gov News"
+  url: "https://www.usa.gov/rss/updates.xml"
+  bias: "gov"
+- name: "CDC Newsroom"
+  url: "https://tools.cdc.gov/api/v2/resources/media/404952.rss"
+  bias: "gov"
+- name: "NASA Breaking News"
+  url: "https://www.nasa.gov/rss/dyn/breaking_news.rss"
+  bias: "gov"
