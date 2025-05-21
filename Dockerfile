@@ -8,6 +8,4 @@ WORKDIR /app
 COPY --from=builder /app/cmd/sankarea/sankarea .
 COPY config ./config
 COPY data ./data
-# Pass all env vars at runtime
 CMD ["./sankarea"]
-
