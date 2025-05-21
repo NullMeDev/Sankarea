@@ -815,3 +815,336 @@ func handleCommands(s *discordgo.Session, i *discordgo.InteractionCreate) {
         s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
             Type: discordgo.InteractionResponseChannelMessageWithSource,
             Data: &discordgo.InteractionResponseData{
+                Content: fmt.Sprintf("User <@%s> unsilenced.", targetUser.ID),
+            },
+        })
+
+    case "kick":
+        if !isAdminOrOwner(i) {
+            s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+                Type: discordgo.InteractionResponseChannelMessageWithSource,
+                Data: &discordgo.InteractionResponseData{
+                    Content: "Weeb, You Do Not Have The Right Privileges.",
+                },
+            })
+            return
+        }
+        targetUser := i.ApplicationCommandData().Options[0].UserValue(s)
+        if !canTarget(i, targetUser.ID) {
+            s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+                Type: discordgo.InteractionResponseChannelMessageWithSource,
+                Data: &discordgo.InteractionResponseData{
+                    Content: "Cannot kick user with equal/higher permissions.",
+                },
+            })
+            return
+        }
+        err := s.GuildMemberDeleteWithReason(i.GuildID, targetUser.ID, "Kicked by admin/owner via Sankarea bot")
+        if err != nil {
+            s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+                Type: discordgo.InteractionResponseChannelMessageWithSource,
+                Data: &discordgo.InteractionResponseData{
+                    Content: "Failed to kick user: " + err.Error(),
+                },
+            })
+            logAudit("KickFail", fmt.Sprintf("Attempt on <@%s> by <@%s>: %v", targetUser.ID, userID, err), 0xff0000)
+            return
+        }
+        logAudit("Kicked", fmt.Sprintf("<@%s> kicked by <@%s>", targetUser.ID, userID), 0xff6600)
+        s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+            Type: discordgo.InteractionResponseChannelMessageWithSource,
+            Data: &discordgo.InteractionResponseData{
+                Content: fmt.Sprintf("User <@%s> kicked.", targetUser.ID),
+            },
+        })
+
+    case "ban":
+        if !isAdminOrOwner(i) {
+            s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+                Type: discordgo.InteractionResponseChannelMessageWithSource,
+                Data: &discordgo.InteractionResponseData{
+                    Content: "Weeb, You Do Not Have The Right Privileges.",
+                },
+            })
+            return
+        }
+        targetUser := i.ApplicationCommandData().Options[0].UserValue(s)
+        if !canTarget(i, targetUser.ID) {
+            s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+                Type: discordgo.InteractionResponseChannelMessageWithSource,
+                Data: &discordgo.InteractionResponseData{
+                    Content: "Cannot ban user with equal/higher permissions.",
+                },
+            })
+            return
+        }
+        err := s.GuildBanCreateWithReason(i.GuildID, targetUser.ID, "Banned by admin/owner via Sankarea bot", 0)
+        if err != nil {
+            s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+                Type: discordgo.InteractionResponseChannelMessageWithSource,
+                Data: &discordgo.InteractionResponseData{
+                    Content: "Failed to ban user: " + err.Error(),
+                },
+            })
+            logAudit("BanFail", fmt.Sprintf("Attempt on <@%s> by <@%s>: %v", targetUser.ID, userID, err), 0xff0000)
+            return
+        }
+        logAudit("Banned", fmt.Sprintf("<@%s> banned by <@%s>", targetUser.ID, userID), 0xff0000)
+        s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+            Type: discordgo.InteractionResponseChannelMessageWithSource,
+            Data: &discordgo.InteractionResponseData{
+                Content: fmt.Sprintf("User <@%s> banned.", targetUser.ID),
+            },
+        })
+
+    case "factcheck":
+        claim := i.ApplicationCommandData().Options[0].StringValue()
+        resp := factCheck(claim)
+        s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+            Type: discordgo.InteractionResponseChannelMessageWithSource,
+            Data: &discordgo.InteractionResponseData{
+                Content: resp,
+            },
+        })
+
+    case "reloadconfig":
+        if !isAdminOrOwner(i) {
+            s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+                Type: discordgo.InteractionResponseChannelMessageWithSource,
+                Data: &discordgo.InteractionResponseData{
+                    Content: "Weeb, You Do Not Have The Right Privileges.",
+                },
+            })
+            return
+        }
+        newCfg, err := loadConfig()
+        if err != nil {
+            s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+                Type: discordgo.InteractionResponseChannelMessageWithSource,
+                Data: &discordgo.InteractionResponseData{
+                    Content: "Config reload failed: " + err.Error(),
+                },
+            })
+            return
+        }
+        currentConfig = newCfg
+        auditLogChannelID = currentConfig.AuditLogChannelID
+        sources, _ = loadSources()
+        logAudit("ConfigReload", fmt.Sprintf("By <@%s>", userID), 0x0099ff)
+        s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+            Type: discordgo.InteractionResponseChannelMessageWithSource,
+            Data: &discordgo.InteractionResponseData{
+                Content: "Config reloaded successfully.",
+            },
+        })
+
+    case "health":
+        content := fmt.Sprintf("Bot running. Time: %s\nFeeds: %d\nInterval: %d min\nPaused: %v\nGoRoutines: %d",
+            time.Now().Format(time.RFC1123), len(sources), state.LastInterval, state.Paused, runtime.NumGoroutine())
+        s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+            Type: discordgo.InteractionResponseChannelMessageWithSource,
+            Data: &discordgo.InteractionResponseData{
+                Content: content,
+            },
+        })
+
+    case "version":
+        s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+            Type: discordgo.InteractionResponseChannelMessageWithSource,
+            Data: &discordgo.InteractionResponseData{
+                Content: "Sankarea bot v1.0.0 (custom, latest).",
+            },
+        })
+
+    default:
+        s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+            Type: discordgo.InteractionResponseChannelMessageWithSource,
+            Data: &discordgo.InteractionResponseData{
+                Content: "Unknown or unimplemented command.",
+            },
+        })
+    }
+}
+
+// === Uptime Helper ===
+var startTime = time.Now()
+
+func getUptime() string {
+    return time.Since(startTime).Truncate(time.Second).String()
+}
+
+// Scheduled backup routine saves state and config daily
+func backupScheduler() {
+    for {
+        now := time.Now()
+        backupName := fmt.Sprintf("backup_%s.json", now.Format("20060102_150405"))
+        ioutil.WriteFile("data/"+backupName, []byte(fmt.Sprintf("Config: %+v\nState: %+v", currentConfig, state)), 0644)
+        // Keep only last 7 backups
+        files, _ := ioutil.ReadDir("data")
+        var backups []os.FileInfo
+        for _, f := range files {
+            if len(f.Name()) > 7 && f.Name()[:7] == "backup_" {
+                backups = append(backups, f)
+            }
+        }
+        if len(backups) > 7 {
+            for _, old := range backups[:len(backups)-7] {
+                os.Remove("data/" + old.Name())
+            }
+        }
+        time.Sleep(24 * time.Hour)
+    }
+}
+
+// === Main entry point ===
+func main() {
+    defer logPanic()
+    fmt.Println("Sankarea bot starting up...")
+    
+    // Load environment variables from .env file
+    loadEnv()
+    
+    // Set up logging
+    if err := setupLogging(); err != nil {
+        log.Printf("Warning: Failed to set up logging: %v", err)
+    }
+    
+    logf("Starting Sankarea bot...")
+
+    fileMustExist("config/config.json")
+    fileMustExist("config/sources.yml")
+    
+    // Create data directory if it doesn't exist
+    if _, err := os.Stat("data"); os.IsNotExist(err) {
+        os.Mkdir("data", 0755)
+    }
+    
+    // Create default state file if it doesn't exist
+    if _, err := os.Stat("data/state.json"); os.IsNotExist(err) {
+        defaultState := State{
+            Paused:       false,
+            LastDigest:   time.Time{},
+            LastInterval: 15,
+            LastError:    "",
+            NewsNextTime: time.Time{},
+            FeedCount:    0,
+            Lockdown:     false,
+            Version:      "1.0.0",
+            StartupTime:  time.Now(),
+            ErrorCount:   0,
+        }
+        saveState(defaultState)
+    }
+
+    discordBotToken := getEnvOrFail("DISCORD_BOT_TOKEN")
+    discordAppID := getEnvOrFail("DISCORD_APPLICATION_ID")
+    discordGuildID = getEnvOrFail("DISCORD_GUILD_ID")
+    discordChannelID = getEnvOrFail("DISCORD_CHANNEL_ID")
+    discordOwnerID = getEnvOrDefault("DISCORD_OWNER_ID", "")
+
+    var err error
+    sources, err = loadSources()
+    if err != nil {
+        log.Fatalf("Failed to load sources.yml: %v", err)
+    }
+    currentConfig, err = loadConfig()
+    if err != nil {
+        log.Fatalf("Failed to load config.json: %v", err)
+    }
+    auditLogChannelID = currentConfig.AuditLogChannelID
+    
+    // Set default values for config if not present
+    if currentConfig.Version == "" {
+        currentConfig.Version = "1.0.0"
+    }
+    if currentConfig.MaxPostsPerSource == 0 {
+        currentConfig.MaxPostsPerSource = 1
+    }
+    if currentConfig.NewsDigestCron == "" {
+        currentConfig.NewsDigestCron = "0 */2 * * *" // Default: every 2 hours
+    }
+    
+    saveConfig(currentConfig)
+
+    state, err = loadState()
+    if err != nil {
+        log.Printf("Failed to load state, using defaults: %v", err)
+        state = State{
+            Paused:       false,
+            LastDigest:   time.Time{},
+            LastInterval: 15,
+            LastError:    "",
+            NewsNextTime: time.Time{},
+            FeedCount:    0,
+            Lockdown:     false,
+            Version:      "1.0.0",
+            StartupTime:  time.Now(),
+            ErrorCount:   0,
+        }
+    }
+    
+    // Update startup time
+    state.StartupTime = time.Now()
+    saveState(state)
+
+    dg, err = discordgo.New("Bot " + discordBotToken)
+    if err != nil {
+        log.Fatalf("Error creating Discord session: %v", err)
+    }
+
+    guild, err := dg.Guild(discordGuildID)
+    if err == nil && discordOwnerID == "" {
+        discordOwnerID = guild.OwnerID
+    }
+
+    dg.AddHandler(func(s *discordgo.Session, i *discordgo.InteractionCreate) {
+        handleCommands(s, i)
+    })
+
+    err = dg.Open()
+    if err != nil {
+        log.Fatalf("Error opening connection to Discord: %v", err)
+    }
+    defer dg.Close()
+    
+    // Register slash commands
+    logf("Registering slash commands...")
+    err = registerCommands(dg, discordAppID, discordGuildID)
+    if err != nil {
+        logf("Warning: Failed to register some commands: %v", err)
+    }
+
+    _, err = dg.ChannelMessageSend(discordChannelID, "🟢 Sankarea bot is online and ready. Use /setnewsinterval to control posting frequency.")
+    if err != nil {
+        logf("Failed to send startup message: %v", err)
+    }
+
+    cronJob = cron.New()
+    var minutes int
+    _, err = fmt.Sscanf(currentConfig.News15MinCron, "*/%d * * * *", &minutes)
+    if err != nil || minutes < 15 || minutes > 360 {
+        minutes = 15
+    }
+    updateCronJob(minutes)
+    
+    // Add digest cron job
+    if currentConfig.NewsDigestCron != "" {
+        _, err = cronJob.AddFunc(currentConfig.NewsDigestCron, func() {
+            postNewsDigest(dg, discordChannelID, sources)
+        })
+        if err != nil {
+            logf("Failed to schedule news digest: %v", err)
+        }
+    }
+    
+    cronJob.Start()
+    fetchAndPostNews(dg, discordChannelID, sources)
+
+    go backupScheduler()
+
+    logf("Sankarea bot is running. Press CTRL+C to exit.")
+    stop := make(chan os.Signal, 1)
+    signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+    <-stop
+    logf("Sankarea bot shutting down...")
+}
