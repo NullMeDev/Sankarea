@@ -1,5 +1,3 @@
 {
-  "news15MinCron": "*/15 * * * *",
-  "bias2HourCron": "0 */2 * * *"
+  "news15MinCron": "0 */15 * * * *"
 }
-
