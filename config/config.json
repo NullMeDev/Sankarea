@@ -1,4 +1,4 @@
 {
   "news15MinCron": "*/15 * * * *",
-  "auditLogChannelId": "YOUR_DISCORD_CHANNEL_ID"
+  "auditLogChannelId": "1374629215638519909"
 }
