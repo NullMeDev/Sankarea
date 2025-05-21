@@ -1,11 +1,9 @@
-module github.com/NullMeDev/sankarea-extreme
+module github.com/NullMeDev/sankarea
 
-go 1.21
+go 1.20
 
 require (
-    github.com/bwmarrin/discordgo v0.23.3
-    github.com/jmoiron/sqlx v1.3.4
-    github.com/lib/pq v1.13.6
-    github.com/sirupsen/logrus v1.9.0
-    github.com/golang-migrate/migrate/v4 v4.15.2
+    github.com/bwmarrin/discordgo v0.25.1
+    github.com/mmcdole/gofeed v1.2.1
+    github.com/robfig/cron/v3 v3.0.1
 )
