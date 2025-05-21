@@ -4,6 +4,8 @@ import (
     "fmt"
     "log"
     "os"
+    "os/signal"
+    "syscall"
 
     "github.com/bwmarrin/discordgo"
 )
@@ -32,6 +34,8 @@ func main() {
 
     // Load secrets from environment
     discordBotToken := getEnvOrFail("DISCORD_BOT_TOKEN")
+    discordAppID := getEnvOrFail("DISCORD_APPLICATION_ID")
+    discordGuildID := getEnvOrFail("DISCORD_GUILD_ID")
     discordChannelID := getEnvOrFail("DISCORD_CHANNEL_ID")
 
     // Connect to Discord
@@ -40,20 +44,49 @@ func main() {
         log.Fatalf("Error creating Discord session: %v", err)
     }
 
+    // Add interaction handler
+    dg.AddHandler(func(s *discordgo.Session, i *discordgo.InteractionCreate) {
+        if i.Type == discordgo.InteractionApplicationCommand {
+            switch i.ApplicationCommandData().Name {
+            case "ping":
+                s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+                    Type: discordgo.InteractionResponseChannelMessageWithSource,
+                    Data: &discordgo.InteractionResponseData{
+                        Content: "Pong!",
+                    },
+                })
+            }
+        }
+    })
+
+    // Open a websocket connection to Discord
     err = dg.Open()
     if err != nil {
         log.Fatalf("Error opening connection to Discord: %v", err)
     }
     defer dg.Close()
 
-    // Send a test message to your channel on startup
-    msg, err := dg.ChannelMessageSend(discordChannelID, "🟢 Sankarea bot is online and running.")
+    // Register the /ping command for your guild
+    _, err = dg.ApplicationCommandCreate(discordAppID, discordGuildID, &discordgo.ApplicationCommand{
+        Name:        "ping",
+        Description: "Test if the bot is alive",
+    })
     if err != nil {
-        log.Fatalf("Failed to send startup message: %v", err)
+        log.Fatalf("Cannot create slash command: %v", err)
     }
-    fmt.Printf("Startup message sent. Message ID: %s\n", msg.ID)
 
-    // Keep the bot running
+    // Send a test message on startup
+    _, err = dg.ChannelMessageSend(discordChannelID, "🟢 Sankarea bot is online and ready. Use `/ping` to test me.")
+    if err != nil {
+        log.Printf("Failed to send startup message: %v", err)
+    }
+
     fmt.Println("Sankarea bot is running. Press CTRL+C to exit.")
-    select {}
+
+    // Wait for a CTRL+C or kill signal
+    stop := make(chan os.Signal, 1)
+    signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+    <-stop
+
+    fmt.Println("Sankarea bot shutting down...")
 }
