@@ -37,3 +37,289 @@
   factCheckAuto: true
   summarizeAuto: true
   active: true
+
+- name: "The Wall Street Journal"
+  url: "https://feeds.a.dj.com/rss/RSSWorldNews.xml"
+  category: "Business"
+  bias: "Center-Right"
+  factCheckAuto: true
+  summarizeAuto: true
+  active: true
+
+- name: "The Washington Post"
+  url: "http://feeds.washingtonpost.com/rss/world"
+  category: "Mainstream"
+  bias: "Left-Center"
+  factCheckAuto: true
+  summarizeAuto: true
+  active: true
+
+- name: "The New York Times"
+  url: "https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml"
+  category: "Mainstream"
+  bias: "Left-Center"
+  factCheckAuto: true
+  summarizeAuto: true
+  active: true
+
+- name: "Al Jazeera"
+  url: "https://www.aljazeera.com/xml/rss/all.xml"
+  category: "International"
+  bias: "Center-Left"
+  factCheckAuto: true
+  summarizeAuto: true
+  active: true
+
+- name: "NPR"
+  url: "https://feeds.npr.org/1001/rss.xml"
+  category: "Mainstream"
+  bias: "Center-Left"
+  factCheckAuto: true
+  summarizeAuto: true
+  active: true
+
+- name: "The Guardian"
+  url: "https://www.theguardian.com/world/rss"
+  category: "International"
+  bias: "Left-Center"
+  factCheckAuto: true
+  summarizeAuto: true
+  active: true
+
+- name: "The Economist"
+  url: "https://www.economist.com/the-world-this-week/rss.xml"
+  category: "Business"
+  bias: "Center"
+  factCheckAuto: true
+  summarizeAuto: true
+  active: true
+
+- name: "Bloomberg"
+  url: "https://feeds.bloomberg.com/markets/news.rss"
+  category: "Business"
+  bias: "Center"
+  factCheckAuto: true
+  summarizeAuto: true
+  active: true
+
+- name: "CNBC"
+  url: "https://www.cnbc.com/id/100003114/device/rss/rss.html"
+  category: "Business"
+  bias: "Center"
+  factCheckAuto: true
+  summarizeAuto: true
+  active: true
+
+- name: "Financial Times"
+  url: "https://www.ft.com/?format=rss"
+  category: "Business"
+  bias: "Center"
+  factCheckAuto: true
+  summarizeAuto: true
+  active: true
+
+- name: "Politico"
+  url: "https://www.politico.com/rss/politicopicks.xml"
+  category: "Politics"
+  bias: "Center"
+  factCheckAuto: true
+  summarizeAuto: true
+  active: true
+
+- name: "The Hill"
+  url: "https://thehill.com/rss/syndicator/19110"
+  category: "Politics"
+  bias: "Center"
+  factCheckAuto: true
+  summarizeAuto: true
+  active: true
+
+- name: "Breitbart"
+  url: "https://feeds.feedburner.com/breitbart"
+  category: "Politics"
+  bias: "Right"
+  factCheckAuto: true
+  summarizeAuto: true
+  active: true
+
+- name: "HuffPost"
+  url: "https://www.huffpost.com/section/front-page/feed"
+  category: "Mainstream"
+  bias: "Left"
+  factCheckAuto: true
+  summarizeAuto: true
+  active: true
+
+- name: "Daily Wire"
+  url: "https://www.dailywire.com/feeds/rss.xml"
+  category: "Politics"
+  bias: "Right"
+  factCheckAuto: true
+  summarizeAuto: true
+  active: true
+
+- name: "Vox"
+  url: "https://www.vox.com/rss/index.xml"
+  category: "Analysis"
+  bias: "Left"
+  factCheckAuto: true
+  summarizeAuto: true
+  active: true
+
+- name: "National Review"
+  url: "https://www.nationalreview.com/feed/"
+  category: "Analysis"
+  bias: "Right"
+  factCheckAuto: true
+  summarizeAuto: true
+  active: true
+
+- name: "ABC News"
+  url: "https://abcnews.go.com/abcnews/topstories"
+  category: "Mainstream"
+  bias: "Center-Left"
+  factCheckAuto: true
+  summarizeAuto: true
+  active: true
+
+- name: "CBS News"
+  url: "https://www.cbsnews.com/latest/rss/main"
+  category: "Mainstream"
+  bias: "Center-Left"
+  factCheckAuto: true
+  summarizeAuto: true
+  active: true
+
+- name: "NBC News"
+  url: "https://feeds.nbcnews.com/nbcnews/public/news"
+  category: "Mainstream"
+  bias: "Center-Left"
+  factCheckAuto: true
+  summarizeAuto: true
+  active: true
+
+- name: "The Atlantic"
+  url: "https://www.theatlantic.com/feed/all/"
+  category: "Analysis"
+  bias: "Left-Center"
+  factCheckAuto: true
+  summarizeAuto: true
+  active: true
+
+- name: "The New Yorker"
+  url: "https://www.newyorker.com/feed/news"
+  category: "Analysis"
+  bias: "Left"
+  factCheckAuto: true
+  summarizeAuto: true
+  active: true
+
+- name: "Newsweek"
+  url: "https://www.newsweek.com/rss"
+  category: "Mainstream"
+  bias: "Center"
+  factCheckAuto: true
+  summarizeAuto: true
+  active: true
+
+- name: "Time Magazine"
+  url: "https://time.com/feed/"
+  category: "Mainstream"
+  bias: "Center-Left"
+  factCheckAuto: true
+  summarizeAuto: true
+  active: true
+
+- name: "Reason"
+  url: "https://reason.com/feed/"
+  category: "Analysis"
+  bias: "Center-Right"
+  factCheckAuto: true
+  summarizeAuto: true
+  active: true
+
+# Technology Sources
+- name: "Wired"
+  url: "https://www.wired.com/feed/rss"
+  category: "Technology"
+  bias: "Center"
+  factCheckAuto: true
+  summarizeAuto: true
+  active: true
+
+- name: "TechCrunch"
+  url: "https://techcrunch.com/feed/"
+  category: "Technology"
+  bias: "Center"
+  factCheckAuto: true
+  summarizeAuto: true
+  active: true
+
+- name: "Ars Technica"
+  url: "https://feeds.arstechnica.com/arstechnica/index"
+  category: "Technology"
+  bias: "Center"
+  factCheckAuto: true
+  summarizeAuto: true
+  active: true
+
+# Science Sources
+- name: "Science Daily"
+  url: "https://www.sciencedaily.com/rss/all.xml"
+  category: "Science"
+  bias: "Center"
+  factCheckAuto: true
+  summarizeAuto: true
+  active: true
+
+- name: "Nature"
+  url: "https://www.nature.com/nature.rss"
+  category: "Science"
+  bias: "Center"
+  factCheckAuto: true
+  summarizeAuto: true
+  active: true
+
+# Health Sources
+- name: "WebMD"
+  url: "https://rssfeeds.webmd.com/rss/rss.aspx?RSSSource=RSS_PUBLIC"
+  category: "Health"
+  bias: "Center"
+  factCheckAuto: true
+  summarizeAuto: true
+  active: true
+
+# Sports Sources
+- name: "ESPN"
+  url: "https://www.espn.com/espn/rss/news"
+  category: "Sports"
+  bias: "Center"
+  factCheckAuto: false
+  summarizeAuto: true
+  active: true
+
+# Entertainment Sources
+- name: "Variety"
+  url: "https://variety.com/feed/"
+  category: "Entertainment"
+  bias: "Center"
+  factCheckAuto: false
+  summarizeAuto: true
+  active: true
+
+# Fact Checking Sources
+- name: "Snopes"
+  url: "https://www.snopes.com/feed/"
+  category: "Fact Check"
+  bias: "Center"
+  factCheckAuto: false
+  summarizeAuto: true
+  active: true
+
+- name: "PolitiFact"
+  url: "https://www.politifact.com/rss/statements/"
+  category: "Fact Check"
+  bias: "Center-Left"
+  factCheckAuto: false
+  summarizeAuto: true
+  active: true
