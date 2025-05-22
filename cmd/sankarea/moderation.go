@@ -66,10 +66,10 @@ func ModerateContent(content string) (*ContentModeration, error) {
 		severity = max(severity, SeverityMedium)
 		maxScore = max(maxScore, result.CategoryScores.Harassment)
 	}
-	if result.Categories.HarmfulContent && result.CategoryScores.HarmfulContent > 0.5 {
+	if result.Categories.HateThreatening && result.CategoryScores.HateThreatening > 0.5 {
 		flaggedCategories = append(flaggedCategories, "harmful content")
 		severity = max(severity, SeverityMedium)
-		maxScore = max(maxScore, result.CategoryScores.HarmfulContent)
+		maxScore = max(maxScore, result.CategoryScores.HateThreatening)
 	}
 	if result.Categories.Hate && result.CategoryScores.Hate > 0.5 {
 		flaggedCategories = append(flaggedCategories, "hate")
@@ -103,7 +103,7 @@ func ModerateContent(content string) (*ContentModeration, error) {
 		Flagged:     result.Flagged,
 		Categories:  map[string]bool{
 			"harassment":  result.Categories.Harassment,
-			"harmful":     result.Categories.HarmfulContent,
+			"harmful":     result.Categories.HateThreatening,
 			"hate":        result.Categories.Hate,
 			"self_harm":   result.Categories.SelfHarm,
 			"sexual":      result.Categories.Sexual,
@@ -179,6 +179,14 @@ func truncateString(s string, maxLen int) string {
 
 // max returns the maximum of two integers
 func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// max returns the maximum of two float64s
+func maxFloat64(a, b float64) float64 {
 	if a > b {
 		return a
 	}
