@@ -14,6 +14,15 @@ const (
     stateFilePath   = "data/state.json"
 )
 
+// Global state for your bot
+var state State
+
+// saveState updates the global and writes it to disk
+func saveState(s State) error {
+    state = s
+    return SaveState(s)
+}
+
 type Source struct {
     Name   string `yaml:"name"`
     URL    string `yaml:"url"`
