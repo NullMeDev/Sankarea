@@ -1,1 +1,11 @@
-{}
+{
+  "paused": false,
+  "feedCount": 0,
+  "digestCount": 0,
+  "errorCount": 0,
+  "startupTime": "2025-05-22T08:24:42Z",
+  "newsNextTime": "2025-05-22T08:39:42Z",
+  "digestNextTime": "2025-05-23T08:00:00Z",
+  "version": "1.0.0",
+  "lastInterval": 15
+}
