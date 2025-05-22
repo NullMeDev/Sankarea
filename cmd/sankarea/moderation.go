@@ -95,86 +95,92 @@ func ModerateContent(content string) (*ContentModeration, error) {
 	// Build explanation
 	explanation := ""
 	if len(flaggedCategories) > 0 {
-		explanation = fmt.Sprintf("Content flagged for: %s (confidence: %.1f%%)", 
+		explanation = fmt.Sprintf("Content flagged for %s with %0.1f%% confidence", 
 			strings.Join(flaggedCategories, ", "), maxScore*100)
 	}
 
-	// Create moderation result
-	modResult := &ContentModeration{
+	return &ContentModeration{
 		Flagged:     result.Flagged,
-		Categories:  make(map[string]bool),
+		Categories:  map[string]bool{
+			"harassment":  result.Categories.Harassment,
+			"harmful":     result.Categories.HarmfulContent,
+			"hate":        result.Categories.Hate,
+			"self_harm":   result.Categories.SelfHarm,
+			"sexual":      result.Categories.Sexual,
+			"violence":    result.Categories.Violence,
+		},
 		Severity:    severity,
 		Explanation: explanation,
-	}
-
-	// Copy categories
-	modResult.Categories["harassment"] = result.Categories.Harassment
-	modResult.Categories["harmful"] = result.Categories.HarmfulContent
-	modResult.Categories["hate"] = result.Categories.Hate
-	modResult.Categories["self-harm"] = result.Categories.SelfHarm
-	modResult.Categories["sexual"] = result.Categories.Sexual
-	modResult.Categories["violence"] = result.Categories.Violence
-
-	return modResult, nil
+	}, nil
 }
 
-// ShouldAllowContent checks if content should be allowed based on moderation
-func ShouldAllowContent(mod *ContentModeration) bool {
-	if mod == nil {
-		return true
+// HandleModeratedContent takes action based on moderation result
+func HandleModeratedContent(s *discordgo.Session, channelID, messageID, content string, result *ContentModeration) {
+	if !result.Flagged || result.Severity < SeverityMedium {
+		return // No action needed
 	}
 
-	// Block high severity content
-	if mod.Severity >= SeverityHigh {
-		return false
+	// Log the moderation event
+	Logger().Printf("Content moderation alert: %s (severity %d)", result.Explanation, result.Severity)
+
+	// For higher severity, delete the message
+	if result.Severity >= SeverityHigh {
+		err := s.ChannelMessageDelete(channelID, messageID)
+		if err != nil {
+			Logger().Printf("Failed to delete flagged message: %v", err)
+		} else {
+			Logger().Printf("Deleted message with severity %d from channel %s", result.Severity, channelID)
+		}
 	}
 
-	// Allow everything else
-	return true
+	// Send notification to audit log
+	if cfg.AuditLogChannelID != "" {
+		embed := &discordgo.MessageEmbed{
+			Title:       "Content Moderation Alert",
+			Description: result.Explanation,
+			Color:       0xFF0000, // Red
+			Fields: []*discordgo.MessageEmbedField{
+				{
+					Name:   "Severity",
+					Value:  fmt.Sprintf("%d/3", result.Severity),
+					Inline: true,
+				},
+				{
+					Name:   "Channel",
+					Value:  fmt.Sprintf("<#%s>", channelID),
+					Inline: true,
+				},
+			},
+			Timestamp: time.Now().Format(time.RFC3339),
+		}
+		
+		if result.Severity < SeverityHigh {
+			embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
+				Name:   "Content",
+				Value:  truncateString(content, 200),
+				Inline: false,
+			})
+		}
+		
+		_, err := s.ChannelMessageSendEmbed(cfg.AuditLogChannelID, embed)
+		if err != nil {
+			Logger().Printf("Failed to send moderation alert: %v", err)
+		}
+	}
 }
 
-// FilterNewsContent filters news content based on moderation
-func FilterNewsContent(title, content string) (string, string, bool, string) {
-	combined := title + "\n\n" + content
-	
-	// Check if content filtering is enabled
-	if !cfg.EnableContentFiltering {
-		return title, content, true, ""
+// Helper function to limit string length
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
 	}
-	
-	// Perform moderation check
-	mod, err := ModerateContent(combined)
-	if err != nil {
-		Logger().Printf("Moderation error: %v", err)
-		return title, content, true, ""  // Allow on error
-	}
-	
-	// Decide whether to allow content
-	allowed := ShouldAllowContent(mod)
-	
-	// If rejected, return reason
-	if !allowed {
-		return "", "", false, mod.Explanation
-	}
-	
-	// If medium severity, add warning
-	if mod.Severity == SeverityMedium {
-		warningMsg := fmt.Sprintf("⚠️ Content Warning: This article may contain sensitive material (%s)", mod.Explanation)
-		content = warningMsg + "\n\n" + content
-	}
-	
-	return title, content, true, ""
+	return s[:maxLen-3] + "..."
 }
 
-// SendContentWarning sends a warning about filtered content
-func SendContentWarning(s *discordgo.Session, channelID, sourceName, reason string) {
-	// Build warning message
-	msg := fmt.Sprintf("⚠️ **Content Warning**: Article from **%s** was filtered due to %s", 
-		sourceName, reason)
-	
-	// Log the warning
-	Logger().Printf("Content filtered: %s - %s", sourceName, reason)
-	
-	// Send as message
-	s.ChannelMessageSend(channelID, msg)
+// max returns the maximum of two integers
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
