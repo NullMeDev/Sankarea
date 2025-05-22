@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -15,6 +16,7 @@ var state = &State{
 	ErrorCount:  0,
 	StartupTime: time.Now(),
 	Version:     VERSION,
+	SystemStatus: "initializing",
 }
 
 var stateMutex sync.Mutex
@@ -48,6 +50,11 @@ func LoadState() (*State, error) {
 	stateMutex.Lock()
 	defer stateMutex.Unlock()
 
+	// Ensure data directory exists
+	if err := os.MkdirAll(filepath.Dir(stateFilePath), 0755); err != nil {
+		return nil, err
+	}
+
 	// If file doesn't exist, create it with default state
 	if _, err := os.Stat(stateFilePath); os.IsNotExist(err) {
 		if err := SaveState(state); err != nil {
@@ -70,9 +77,22 @@ func LoadState() (*State, error) {
 		return state, nil
 	}
 
+	// Create a new state to avoid race conditions during unmarshalling
+	var loadedState State
+	
 	// Parse the state
-	if err := json.Unmarshal(data, state); err != nil {
+	if err := json.Unmarshal(data, &loadedState); err != nil {
 		return nil, err
+	}
+	
+	// Update our global state with the loaded values
+	state = &loadedState
+	
+	// Set system status based on paused state
+	if state.Paused {
+		state.SystemStatus = "paused"
+	} else {
+		state.SystemStatus = "running"
 	}
 
 	return state, nil
@@ -83,25 +103,35 @@ func SaveState(s *State) error {
 	stateMutex.Lock()
 	defer stateMutex.Unlock()
 
-	// Copy the state to avoid data race
-	state = s
+	// Create a copy of the state to avoid data race
+	stateCopy := *s 
+	
+	// Update the state copy
+	state = &stateCopy
 
 	// Calculate uptime before saving
 	state.UptimeSeconds = time.Since(state.StartupTime).Milliseconds() / 1000
 
 	// Convert state to JSON
-	data, err := json.MarshalIndent(s, "", "  ")
+	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err
 	}
 
 	// Ensure the data directory exists
-	if err := os.MkdirAll("data", 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(stateFilePath), 0755); err != nil {
 		return err
 	}
 
-	// Write to file
-	return os.WriteFile(stateFilePath, data, 0644)
+	// Write to file atomically to prevent corruption
+	// First write to a temporary file
+	tempFile := stateFilePath + ".tmp"
+	if err := os.WriteFile(tempFile, data, 0644); err != nil {
+		return err
+	}
+	
+	// Then rename to the actual file (atomic operation on most file systems)
+	return os.Rename(tempFile, stateFilePath)
 }
 
 // UpdateNewsNextTime updates the time for the next news fetch
@@ -225,10 +255,13 @@ func GetSystemStatus() map[string]interface{} {
 	stateMutex.Lock()
 	defer stateMutex.Unlock()
 	
+	// Calculate current uptime
+	currentUptime := time.Since(state.StartupTime).Milliseconds() / 1000
+	
 	status := map[string]interface{}{
 		"status":         state.SystemStatus,
 		"version":        state.Version,
-		"uptime_seconds": state.UptimeSeconds,
+		"uptime_seconds": currentUptime,
 		"paused":         state.Paused,
 		"feed_count":     state.FeedCount,
 		"digest_count":   state.DigestCount,
