@@ -1,41 +1,47 @@
 FROM golang:1.19-alpine AS builder
 
-# Install dependencies
+# Install build dependencies
 RUN apk add --no-cache git make
 
-# Set working directory
 WORKDIR /app
 
-# Copy go.mod and go.sum files
-COPY go.mod ./
-
-# Download dependencies
+# Copy go.mod and go.sum first for better layer caching
+COPY go.mod go.sum* ./
 RUN go mod download
 
 # Copy source code
 COPY . .
 
 # Build the application
-RUN go build -o sankarea ./cmd/sankarea
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o sankarea ./cmd/sankarea
 
-# Create final lightweight image
-FROM alpine:latest
+# Create runtime image
+FROM alpine:3.18
 
-# Install ca-certificates for HTTPS requests
-RUN apk --no-cache add ca-certificates tzdata
+# Add runtime dependencies and security updates
+RUN apk --no-cache add ca-certificates tzdata && \
+    apk upgrade --no-cache
 
-# Set working directory
 WORKDIR /app
 
-# Copy application binary from builder
+# Copy binary from builder
 COPY --from=builder /app/sankarea /app/
 
-# Create directories for data persistence
-RUN mkdir -p /app/config /app/data /app/logs /app/dashboard
+# Create directories with appropriate permissions
+RUN mkdir -p /app/config /app/data /app/logs /app/dashboard/templates /app/dashboard/static && \
+    chmod -R 755 /app
 
-# Copy configs
+# Copy required files
 COPY config/ /app/config/
 COPY dashboard/ /app/dashboard/
 
-# Set the entrypoint
+# Use non-root user for security
+RUN adduser -D -h /app appuser && \
+    chown -R appuser:appuser /app
+USER appuser
+
+# Define volume mount points for persistence
+VOLUME ["/app/config", "/app/data", "/app/logs"]
+
+# Command to run
 ENTRYPOINT ["/app/sankarea"]
