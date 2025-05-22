@@ -1,55 +1,44 @@
 package main
 
 import (
-    "bufio"
-    "log"
-    "os"
-    "strings"
+	"os"
+	"path/filepath"
+
+	"github.com/joho/godotenv"
 )
 
-// LoadEnv reads a .env file and sets variables if not already present
+// LoadEnv loads environment variables from .env file
 func LoadEnv() {
-    if _, err := os.Stat(".env"); err == nil {
-        file, err := os.Open(".env")
-        if err != nil {
-            log.Printf("Error opening .env: %v", err)
-            return
-        }
-        defer file.Close()
-        scanner := bufio.NewScanner(file)
-        for scanner.Scan() {
-            line := strings.TrimSpace(scanner.Text())
-            if line == "" || strings.HasPrefix(line, "#") {
-                continue
-            }
-            parts := strings.SplitN(line, "=", 2)
-            if len(parts) != 2 {
-                continue
-            }
-            key := strings.TrimSpace(parts[0])
-            val := strings.TrimSpace(parts[1])
-            if os.Getenv(key) == "" {
-                os.Setenv(key, val)
-            }
-        }
-        if err := scanner.Err(); err != nil {
-            log.Printf("Error reading .env: %v", err)
-        }
-    }
+	godotenv.Load()
 }
 
-// FileMustExist fatals if a required file is missing
+// FileMustExist checks if a file exists and is readable
+// If not, it creates a default version of the file
 func FileMustExist(path string) {
-    if _, err := os.Stat(path); os.IsNotExist(err) {
-        log.Fatalf("ERROR: Required file not found: %s", path)
-    }
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		// Create directory if needed
+		dir := filepath.Dir(path)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			Logger().Printf("Failed to create directory %s: %v", dir, err)
+			os.Exit(1)
+		}
+
+		// Create empty file
+		file, err := os.Create(path)
+		if err != nil {
+			Logger().Printf("Failed to create file %s: %v", path, err)
+			os.Exit(1)
+		}
+		file.Close()
+
+		Logger().Printf("Created empty file: %s", path)
+	}
 }
 
-// EnsureDataDir creates the data directory if it doesn't exist
+// EnsureDataDir ensures the data directory exists
 func EnsureDataDir() {
-    if _, err := os.Stat("data"); os.IsNotExist(err) {
-        if err := os.Mkdir("data", 0755); err != nil {
-            log.Fatalf("ERROR: Could not create data dir: %v", err)
-        }
-    }
+	if err := os.MkdirAll("data", 0755); err != nil {
+		Logger().Printf("Failed to create data directory: %v", err)
+		os.Exit(1)
+	}
 }
