@@ -20,6 +20,7 @@ type Source struct {
 	Name            string    `json:"name" yaml:"name"`
 	URL             string    `json:"url" yaml:"url"`
 	Paused          bool      `json:"paused" yaml:"paused"`
+	Active          bool      `json:"active" yaml:"active"`
 	LastDigest      time.Time `json:"lastDigest" yaml:"lastDigest"`
 	LastFetched     time.Time `json:"lastFetched" yaml:"lastFetched"`
 	LastInterval    int       `json:"lastInterval" yaml:"lastInterval"`
@@ -34,6 +35,7 @@ type Source struct {
 	SummarizeAuto   bool      `json:"summarizeAuto" yaml:"summarizeAuto"`
 	TrustScore      float64   `json:"trustScore" yaml:"trustScore"`
 	ChannelOverride string    `json:"channelOverride" yaml:"channelOverride"`
+	Bias            string    `json:"bias" yaml:"bias"`
 }
 
 // Config holds application configuration
@@ -56,6 +58,7 @@ type Config struct {
 	// Schedule Configuration
 	NewsIntervalMinutes  int      `json:"newsIntervalMinutes"` // Default: 120 (2 hours)
 	DigestCronSchedule   string   `json:"digestCronSchedule"`  // Default: "0 8 * * *" (8 AM daily)
+	News15MinCron        string   `json:"news15MinCron"`      // Cron schedule for news updates
 	
 	// API Keys and Integration
 	OpenAIAPIKey         string   `json:"openai_api_key"`
@@ -66,242 +69,178 @@ type Config struct {
 	EnableFactCheck      bool     `json:"enableFactCheck"`
 	EnableSummarization  bool     `json:"enableSummarization"`
 	EnableContentFiltering bool   `json:"enableContentFiltering"`
+	EnableDatabase       bool     `json:"enableDatabase"`
 	
 	// Advanced Configuration
 	UserAgentString      string   `json:"userAgentString"`
-	MaxRetries           int      `json:"maxRetries"`
-	RetryDelaySeconds    int      `json:"retryDelaySeconds"`
-	MaxErrorsBeforePause int      `json:"maxErrorsBeforePause"`
-	HTTPTimeoutSeconds   int      `json:"httpTimeoutSeconds"`
-	CacheExpiryHours     int      `json:"cacheExpiryHours"`
+	HealthAPIPort        int      `json:"healthAPIPort"`
 }
 
-// State represents the bot's runtime state
-type State struct {
-	Paused          bool      `json:"paused"`
-	LastDigest      time.Time `json:"lastDigest"`
-	LastInterval    int       `json:"lastInterval"`
-	LastError       string    `json:"lastError"`
-	NewsNextTime    time.Time `json:"newsNextTime"`
-	FeedCount       int       `json:"feedCount"`
-	Lockdown        bool      `json:"lockdown"`
-	LockdownSetBy   string    `json:"lockdownSetBy"`
-	Version         string    `json:"version"`
-	StartupTime     time.Time `json:"startupTime"`
-	ErrorCount      int       `json:"errorCount"`
-	TotalArticles   int       `json:"totalArticles"`
-	ArticleCache    []string  `json:"articleCache"` // To prevent duplicates
-	LastSummaryCost float64   `json:"lastSummaryCost"`
-	DailyAPIUsage   float64   `json:"dailyAPIUsage"`
-	LastAPIReset    time.Time `json:"lastAPIReset"`
-}
-
-// LoadConfig loads application configuration
+// LoadConfig loads the application configuration from file and environment variables
 func LoadConfig() (*Config, error) {
-	if err := os.MkdirAll("config", 0755); err != nil {
-		return nil, err
+	// Default config
+	cfg := &Config{
+		Version:             VERSION,
+		MaxPostsPerSource:   5,
+		NewsIntervalMinutes: 120,
+		DigestCronSchedule:  "0 8 * * *", // 8 AM daily
+		News15MinCron:       "*/15 * * * *", // Every 15 minutes
+		UserAgentString:     "Sankarea News Bot v" + VERSION,
 	}
-	
-	if _, err := os.Stat(configFilePath); os.IsNotExist(err) {
-		// Create default config
-		defaultCfg := &Config{
-			Version:             VERSION,
-			MaxPostsPerSource:   5,
-			NewsIntervalMinutes: 120, // 2 hours default
-			DigestCronSchedule:  "0 8 * * *", // 8 AM daily
-			MaxRetries:          3,
-			RetryDelaySeconds:   30,
-			HTTPTimeoutSeconds:  30,
-			CacheExpiryHours:    24,
-			UserAgentString:     "Sankarea-Bot/1.0",
-			EnableFactCheck:     false, // Disabled until API keys are provided
-			EnableSummarization: false, // Disabled until API keys are provided
-			MaxErrorsBeforePause: 5,
-		}
-		
-		if err := SaveConfig(defaultCfg); err != nil {
-			return nil, err
-		}
-		return defaultCfg, nil
-	}
-	
+
+	// Load from file if it exists
 	data, err := os.ReadFile(configFilePath)
-	if err != nil {
-		return nil, err
-	}
-	
-	var cfg Config
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return nil, err
-	}
-	
-	// Ensure version is set
-	if cfg.Version == "" {
-		cfg.Version = VERSION
-	}
-	
-	// Set default values if not present
-	if cfg.MaxPostsPerSource <= 0 {
-		cfg.MaxPostsPerSource = 5
-	}
-	
-	if cfg.NewsIntervalMinutes <= 0 {
-		cfg.NewsIntervalMinutes = 120 // 2 hours
-	}
-	
-	if cfg.DigestCronSchedule == "" {
-		cfg.DigestCronSchedule = "0 8 * * *"
-	}
-
-	return &cfg, nil
-}
-
-// SaveConfig persists configuration
-func SaveConfig(cfg *Config) error {
-	if err := os.MkdirAll("config", 0755); err != nil {
-		return err
-	}
-	
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return err
-	}
-	
-	return os.WriteFile(configFilePath, data, 0644)
-}
-
-// LoadSources loads RSS feed sources
-func LoadSources() ([]Source, error) {
-	if err := os.MkdirAll("config", 0755); err != nil {
-		return nil, err
-	}
-	
-	if _, err := os.Stat(sourcesFilePath); os.IsNotExist(err) {
-		// Create empty sources file
-		if err := SaveSources([]Source{}); err != nil {
+	if err == nil {
+		// File exists, try to parse it
+		if err := json.Unmarshal(data, cfg); err != nil {
 			return nil, err
 		}
-		return []Source{}, nil
 	}
-	
+
+	// Override with environment variables
+	if token := os.Getenv("DISCORD_BOT_TOKEN"); token != "" {
+		cfg.BotToken = token
+	}
+	if appID := os.Getenv("DISCORD_APPLICATION_ID"); appID != "" {
+		cfg.AppID = appID
+	}
+	if guildID := os.Getenv("DISCORD_GUILD_ID"); guildID != "" {
+		cfg.GuildID = guildID
+	}
+	if channelID := os.Getenv("DISCORD_CHANNEL_ID"); channelID != "" {
+		cfg.NewsChannelID = channelID
+	}
+	if openAIKey := os.Getenv("OPENAI_API_KEY"); openAIKey != "" {
+		cfg.OpenAIAPIKey = openAIKey
+	}
+	if googleFactCheckKey := os.Getenv("GOOGLE_FACTCHECK_API_KEY"); googleFactCheckKey != "" {
+		cfg.GoogleFactCheckAPIKey = googleFactCheckKey
+	}
+	if claimBusterKey := os.Getenv("CLAIMBUSTER_API_KEY"); claimBusterKey != "" {
+		cfg.ClaimBustersAPIKey = claimBusterKey
+	}
+
+	return cfg, nil
+}
+
+// LoadSources loads all news sources from the sources file
+func LoadSources() ([]Source, error) {
 	data, err := os.ReadFile(sourcesFilePath)
 	if err != nil {
 		return nil, err
 	}
-	
-	var srcs []Source
-	if err := yaml.Unmarshal(data, &srcs); err != nil {
+
+	var sources []Source
+	if err := yaml.Unmarshal(data, &sources); err != nil {
 		return nil, err
 	}
-	
-	// Ensure all sources have proper initialization
-	for i := range srcs {
-		if srcs[i].TrustScore == 0 {
-			srcs[i].TrustScore = 0.5 // Default neutral trust score
+
+	// Set default values for any sources
+	for i := range sources {
+		if !sources[i].Paused && sources[i].Active == false {
+			sources[i].Active = true
 		}
 	}
-	
-	return srcs, nil
+
+	return sources, nil
 }
 
-// SaveSources persists feed sources
-func SaveSources(srcs []Source) error {
-	if err := os.MkdirAll("config", 0755); err != nil {
-		return err
-	}
-	
-	data, err := yaml.Marshal(srcs)
+// SaveSources saves the sources back to the sources file
+func SaveSources(sources []Source) error {
+	data, err := yaml.Marshal(sources)
 	if err != nil {
 		return err
 	}
-	
+
 	return os.WriteFile(sourcesFilePath, data, 0644)
 }
 
-// LoadState loads bot runtime state
-func LoadState() (*State, error) {
-	if err := os.MkdirAll("data", 0755); err != nil {
-		return nil, err
+// LoadEnv loads environment variables from .env file if it exists
+func LoadEnv() {
+	// No need for external libraries, just check if file exists
+	data, err := os.ReadFile(".env")
+	if err != nil {
+		return
 	}
-	
-	if _, err := os.Stat(stateFilePath); os.IsNotExist(err) {
-		// Create default state
-		defaultState := &State{
-			Version:     VERSION,
-			StartupTime: time.Now(),
-			LastAPIReset: time.Now(),
+
+	// Parse simple KEY=VALUE format
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
 		}
 		
-		if err := SaveState(defaultState); err != nil {
-			return nil, err
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
 		}
-		return defaultState, nil
-	}
-	
-	data, err := os.ReadFile(stateFilePath)
-	if err != nil {
-		return nil, err
-	}
-	
-	var st State
-	if err := json.Unmarshal(data, &st); err != nil {
-		return nil, err
-	}
-	
-	// Check if API usage should be reset (daily)
-	now := time.Now()
-	if now.Sub(st.LastAPIReset).Hours() >= 24 {
-		st.LastAPIReset = now
-		st.DailyAPIUsage = 0
-		if err := SaveState(&st); err != nil {
-			Logger().Printf("Failed to save state after API usage reset: %v", err)
+		
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+		
+		// Remove quotes if present
+		if len(value) > 1 && (value[0] == '"' || value[0] == '\'') && value[0] == value[len(value)-1] {
+			value = value[1 : len(value)-1]
 		}
+		
+		os.Setenv(key, value)
 	}
-	
-	return &st, nil
 }
 
-// SaveState persists bot runtime state
-func SaveState(st *State) error {
-	if err := os.MkdirAll("data", 0755); err != nil {
-		return err
-	}
-	
-	data, err := json.MarshalIndent(st, "", "  ")
-	if err != nil {
-		return err
-	}
-	
-	return os.WriteFile(stateFilePath, data, 0644)
-}
+// FileMustExist checks if a required file exists, creates it with defaults if not
+func FileMustExist(path string) {
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		// Create directory if needed
+		dir := filepath.Dir(path)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			log.Fatalf("Failed to create directory %s: %v", dir, err)
+		}
 
-// AddToCacheAndCheck adds an article URL to cache and checks if it's already cached
-// Returns true if article was already in the cache
-func AddToCacheAndCheck(url string) (bool, error) {
-	state, err := LoadState()
-	if err != nil {
-		return false, err
-	}
-	
-	// Check if URL exists in cache
-	for _, cachedURL := range state.ArticleCache {
-		if cachedURL == url {
-			return true, nil
+		// Create empty file
+		switch path {
+		case configFilePath:
+			// Create default config
+			cfg := &Config{
+				Version:             VERSION,
+				MaxPostsPerSource:   5,
+				NewsIntervalMinutes: 120,
+				DigestCronSchedule:  "0 8 * * *", // 8 AM daily
+				News15MinCron:       "*/15 * * * *", // Every 15 minutes
+				UserAgentString:     "Sankarea News Bot v" + VERSION,
+				EnableFactCheck:     true,
+				EnableSummarization: true,
+			}
+			data, err := json.MarshalIndent(cfg, "", "  ")
+			if err != nil {
+				log.Fatalf("Failed to create default config: %v", err)
+			}
+			if err := os.WriteFile(path, data, 0644); err != nil {
+				log.Fatalf("Failed to write default config: %v", err)
+			}
+		case sourcesFilePath:
+			// Create example sources
+			sources := []Source{
+				{
+					Name:     "Example News",
+					URL:      "https://example.com/rss",
+					Paused:   true,
+					Category: "General",
+					Active:   true,
+				},
+			}
+			data, err := yaml.Marshal(sources)
+			if err != nil {
+				log.Fatalf("Failed to create default sources: %v", err)
+			}
+			if err := os.WriteFile(path, data, 0644); err != nil {
+				log.Fatalf("Failed to write default sources: %v", err)
+			}
+		default:
+			// Create empty file
+			if err := os.WriteFile(path, []byte{}, 0644); err != nil {
+				log.Fatalf("Failed to create file %s: %v", path, err)
+			}
 		}
 	}
-	
-	// Add to cache
-	state.ArticleCache = append(state.ArticleCache, url)
-	
-	// Trim cache if it gets too large (keep last 1000 articles)
-	if len(state.ArticleCache) > 1000 {
-		state.ArticleCache = state.ArticleCache[len(state.ArticleCache)-1000:]
-	}
-	
-	// Save state
-	if err := SaveState(state); err != nil {
-		return false, err
-	}
-	
-	return false, nil
 }
