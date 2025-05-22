@@ -118,15 +118,62 @@ func main() {
 		discordgo.IntentsDirectMessages |
 		discordgo.IntentsMessageContent
 
+	// Initialize managers
+	channelManager := NewChannelManager()
+	channelManager.Initialize()
+	
+	credManager := NewCredibilityManager()
+	topicManager := NewTopicManager()
+	interactionManager := NewInteractionManager()
+	mediaExtractor := NewMediaExtractor()
+
 	// Register commands and handlers
 	if err := RegisterCommands(dg, cfg.AppID, cfg.GuildID); err != nil {
 		HandleError("Failed to register commands", err, "discord", ErrorSeverityFatal)
 	}
 	
+	if err := RegisterUserManagementCommands(dg, cfg.AppID, cfg.GuildID); err != nil {
+		HandleError("Failed to register user management commands", err, "discord", ErrorSeverityMedium)
+	}
+	
+	if err := RegisterChannelCommands(dg, cfg.AppID, cfg.GuildID); err != nil {
+		HandleError("Failed to register channel commands", err, "discord", ErrorSeverityMedium)
+	}
+	
+	if err := RegisterCredibilityCommands(dg, cfg.AppID, cfg.GuildID); err != nil {
+		HandleError("Failed to register credibility commands", err, "discord", ErrorSeverityMedium)
+	}
+	
+	if err := RegisterTopicCommands(dg, cfg.AppID, cfg.GuildID); err != nil {
+		HandleError("Failed to register topic commands", err, "discord", ErrorSeverityMedium)
+	}
+	
 	// Add handlers
-	dg.AddHandler(handleInteraction)
+	dg.AddHandler(func(s *discordgo.Session, i *discordgo.InteractionCreate) {
+		// Try handling with specialized managers first
+		if HandleUserManagementCommands(s, i) {
+			return
+		}
+		
+		if HandleChannelCommands(s, i, channelManager) {
+			return
+		}
+		
+		if HandleCredibilityCommands(s, i, credManager) {
+			return
+		}
+		
+		// Default handler for other commands
+		handleInteraction(s, i)
+	})
+	
 	dg.AddHandler(handleMessageCreate)
 	dg.AddHandler(handleReady)
+	
+	// Add reaction handler
+	dg.AddHandler(func(s *discordgo.Session, r *discordgo.MessageReactionAdd) {
+		interactionManager.HandleReactionAdd(s, r)
+	})
 	
 	// Connect to Discord
 	if err = dg.Open(); err != nil {
@@ -135,6 +182,10 @@ func main() {
 	defer dg.Close()
 	
 	Logger().Println("Successfully connected to Discord!")
+
+	// Initialize fact check service
+	factCheckService := NewFactCheckService()
+	contentAnalyzer := NewContentAnalyzer()
 
 	// Initialize cron manager
 	cronManager = cron.New()
@@ -147,8 +198,26 @@ func main() {
 	
 	// Add news fetch job
 	_, err = cronManager.AddFunc(cfg.News15MinCron, func() {
-		fetchAndPostNews(dg, cfg.NewsChannelID, sources)
+		// Modified to use the new channel manager and media extractor
+		for _, channel := range channelManager.channels {
+			layout := channelManager.GetPostLayout(channel.ChannelID)
+			
+			for _, source := range sources {
+				if !source.Active || source.Paused {
+					continue
+				}
+				
+				// Check if this source should post to this channel
+				if !channelManager.ShouldPostToChannel(source, channel.ChannelID) {
+					continue
+				}
+				
+				// Fetch and process news
+				fetchAndPostNewsWithLayout(dg, channel.ChannelID, source, layout, factCheckService, interactionManager, mediaExtractor, topicManager, contentAnalyzer)
+			}
+		}
 	})
+	
 	if err != nil {
 		HandleError("Failed to schedule news updates", err, "cron", ErrorSeverityMedium)
 	}
@@ -161,9 +230,13 @@ func main() {
 			IncrementDigestCount()
 		}
 	})
+	
 	if err != nil {
 		HandleError("Failed to schedule digest", err, "cron", ErrorSeverityMedium)
 	}
+	
+	// Schedule reports
+	ScheduleReports(dg)
 	
 	// Start cron manager
 	cronManager.Start()
@@ -340,6 +413,9 @@ func CommandRequiresAdmin(cmd string) bool {
 		"source": true,
 		"admin":  true,
 		"config": true,
+		"channel": true,
+		"credibility": true,
+		"topic": true,
 	}
 	return adminCommands[cmd]
 }
@@ -741,4 +817,157 @@ func handleSourceUpdateCommand(s *discordgo.Session, i *discordgo.InteractionCre
 			Flags:   discordgo.MessageFlagsEphemeral,
 		},
 	})
+}
+
+// fetchAndPostNewsWithLayout fetches and posts news with the specified layout
+func fetchAndPostNewsWithLayout(s *discordgo.Session, channelID string, source Source, 
+	layout PostLayout, factService *FactCheckService, interactionManager *InteractionManager,
+	mediaExtractor *MediaExtractor, topicManager *TopicManager, contentAnalyzer *ContentAnalyzer) {
+	
+	state, err := LoadState()
+	if err != nil {
+		Logger().Printf("Cannot load state: %v", err)
+		return
+	}
+
+	if state.Paused || source.Paused {
+		Logger().Println("News fetch paused by system state or source settings")
+		return
+	}
+
+	parser := gofeed.NewParser()
+	
+	// Set user agent if configured
+	if cfg.UserAgentString != "" {
+		parser.UserAgent = cfg.UserAgentString
+	}
+	
+	feed, err := parser.ParseURL(source.URL)
+	if err != nil {
+		Logger().Printf("fetch %s failed: %v", source.Name, err)
+		source.LastError = err.Error()
+		source.ErrorCount++
+		SaveSources([]Source{source})
+		return
+	}
+
+	// Check if we have items to post
+	if len(feed.Items) == 0 {
+		return
+	}
+	
+	// Format and post using the layout
+	maxPosts := cfg.MaxPostsPerSource
+	if maxPosts <= 0 {
+		maxPosts = 5
+	}
+	
+	// Limit the items to post
+	itemsToPost := feed.Items
+	if len(itemsToPost) > maxPosts {
+		itemsToPost = itemsToPost[:maxPosts]
+	}
+	
+	// Format and send the post
+	err = FormatNewsPost(s, channelID, source, feed, itemsToPost, layout)
+	if err != nil {
+		Logger().Printf("Failed to format and post news: %v", err)
+		return
+	}
+	
+	// For each news item, check if we need to process it further
+	for _, item := range itemsToPost {
+		// Process for fact-checking if enabled
+		if source.FactCheckAuto && cfg.EnableFactCheck {
+			results, err := factService.CheckArticle(item.Title, item.Description)
+			if err != nil {
+				Logger().Printf("Fact check error: %v", err)
+			} else if len(results) > 0 {
+				// Post fact check results
+				if err := factService.PostFactCheckResults(s, channelID, item.Link, results); err != nil {
+					Logger().Printf("Failed to post fact check results: %v", err)
+				}
+			}
+		}
+		
+		// Process for media embedding
+		if item.Link != "" {
+			if err := mediaExtractor.EnhanceNewsPost(s, channelID, item); err != nil {
+				Logger().Printf("Media extraction error: %v", err)
+			}
+		}
+		
+		// Process for topic matching
+		if item.Title != "" && item.Description != "" {
+			topicManager.ProcessArticle(s, item.Title, item.Description, item.Link, source.Name)
+		}
+		
+		// Make the post interactive
+		if message, err := s.ChannelMessageSend(channelID, fmt.Sprintf("🔗 [%s](%s) - %s", 
+			item.Title, item.Link, 
+			item.PublishedParsed.Format("Jan 02"))); err == nil {
+			
+			err = interactionManager.RegisterInteractiveMessage(s, message, item.Title, item.Link, source.Name)
+			if err != nil {
+				Logger().Printf("Failed to register interactive message: %v", err)
+			}
+		}
+		
+		// Perform content analysis if enabled
+		if source.SummarizeAuto && cfg.EnableSummarization {
+			analysis, err := contentAnalyzer.AnalyzeContent(item.Title, item.Description, item.Link, source.Name, *item.PublishedParsed)
+			if err != nil {
+				Logger().Printf("Content analysis error: %v", err)
+			} else if analysis.Summary != "" {
+				// Post summary
+				embed := &discordgo.MessageEmbed{
+					Title:       fmt.Sprintf("Summary: %s", item.Title),
+					URL:         item.Link,
+					Description: analysis.Summary,
+					Color:       0x00AAFF,
+					Footer: &discordgo.MessageEmbedFooter{
+						Text: fmt.Sprintf("Source: %s | Category: %s", source.Name, analysis.Category),
+					},
+				}
+				
+				_, err = s.ChannelMessageSendEmbed(channelID, embed)
+				if err != nil {
+					Logger().Printf("Failed to send summary: %v", err)
+				}
+			}
+		}
+	}
+	
+	// Update source stats
+	source.FeedCount += len(itemsToPost)
+	source.LastError = ""
+	source.LastFetched = time.Now()
+	
+	// Update the next time in the state
+	state.NewsNextTime = time.Now().Add(parseCron(cfg.News15MinCron))
+	state.LastInterval = int(parseCron(cfg.News15MinCron).Minutes())
+	SaveState(state)
+	
+	// Save source
+	SaveSources([]Source{source})
+}
+
+// parseCron parses a cron expression and returns the duration to the next run
+func parseCron(cronExpr string) time.Duration {
+	// Default to 15 minutes if parsing fails
+	defaultDuration := 15 * time.Minute
+	
+	if cronExpr == "" {
+		return defaultDuration
+	}
+	
+	schedule, err := cron.ParseStandard(cronExpr)
+	if err != nil {
+		Logger().Printf("Failed to parse cron expression '%s': %v", cronExpr, err)
+		return defaultDuration
+	}
+	
+	now := time.Now()
+	next := schedule.Next(now)
+	return next.Sub(now)
 }
