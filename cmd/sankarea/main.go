@@ -1,106 +1,148 @@
 package main
 
 import (
-    "fmt"
-    "log"
-    "os"
-    "os/signal"
-    "syscall"
+	"fmt"
+	"log"
+	"os"
+	"os/signal"
+	"runtime"
+	"syscall"
+	"time"
 
-    "github.com/bwmarrin/discordgo"
-    "github.com/robfig/cron/v3"
+	"github.com/bwmarrin/discordgo"
+	"github.com/robfig/cron/v3"
 )
 
 var (
-    dg                *discordgo.Session
-    cronJob           *cron.Cron
-    discordChannelID  string
-    auditLogChannelID string
-    discordGuildID    string
-    discordOwnerID    string
-    sources           []Source
-    state             State
+	cronJobID         cron.EntryID
+	cronJob           *cron.Cron
+	currentConfig     Config
+	state             State
+	sources           []Source
+	discordChannelID  string
+	auditLogChannelID string
+	dg                *discordgo.Session
+	discordOwnerID    string
+	discordGuildID    string
+	startTime         time.Time
 )
 
 func main() {
-    // Ensure config and state files exist
-    EnsureRequiredFiles()
+	defer logPanic()
 
-    // Load environment variables
-    discordBotToken := GetEnvOrFail("DISCORD_BOT_TOKEN")
-    discordGuildID = GetEnvOrFail("DISCORD_GUILD_ID")
-    discordChannelID = GetEnvOrFail("DISCORD_CHANNEL_ID")
+	fmt.Println("Sankarea bot starting up...")
 
-    // Load config, sources, and state
-    var err error
-    currentConfig, err = LoadConfig()
-    if err != nil {
-        log.Fatalf("Failed to load config: %v", err)
-    }
-    auditLogChannelID = currentConfig.AuditLogChannelID
+	loadEnv()
 
-    sources, err = LoadSources()
-    if err != nil {
-        log.Fatalf("Failed to load sources: %v", err)
-    }
+	if err := setupLogging(); err != nil {
+		log.Printf("Failed to set up logging: %v", err)
+	}
 
-    state, err = LoadState()
-    if err != nil {
-        log.Printf("No state found or failed to load: %v. Starting fresh.", err)
-        state = State{}
-    }
+	startTime = time.Now()
 
-    // Create Discord session
-    dg, err = discordgo.New("Bot " + discordBotToken)
-    if err != nil {
-        log.Fatalf("Failed to create Discord session: %v", err)
-    }
+	fileMustExist("config/config.json")
+	fileMustExist("config/sources.yml")
 
-    // Retrieve guild owner ID for admin checks
-    guild, err := dg.Guild(discordGuildID)
-    if err == nil {
-        discordOwnerID = guild.OwnerID
-    } else {
-        log.Printf("Failed to get guild info: %v", err)
-    }
+	if _, err := os.Stat("data"); os.IsNotExist(err) {
+		os.Mkdir("data", 0755)
+	}
 
-    // Register slash commands on guild
-    RegisterCommands(dg, discordGuildID)
+	if _, err := os.Stat("data/state.json"); os.IsNotExist(err) {
+		saveState(State{
+			Paused:       false,
+			LastInterval: 15,
+			Version:      "1.0.0",
+			StartupTime:  time.Now().Format(time.RFC3339),
+		})
+	}
 
-    // Add interaction handler
-    dg.AddHandler(handleCommands)
+	discordBotToken := getEnvOrFail("DISCORD_BOT_TOKEN")
+	discordAppID := getEnvOrFail("DISCORD_APPLICATION_ID")
+	discordGuildID = getEnvOrFail("DISCORD_GUILD_ID")
+	discordChannelID = getEnvOrFail("DISCORD_CHANNEL_ID")
+	discordOwnerID = getEnvOrDefault("DISCORD_OWNER_ID", "")
 
-    // Open Discord websocket connection
-    err = dg.Open()
-    if err != nil {
-        log.Fatalf("Failed to open Discord connection: %v", err)
-    }
-    defer dg.Close()
+	var err error
+	sources, err = loadSources()
+	if err != nil {
+		log.Fatalf("Failed to load sources.yml: %v", err)
+	}
 
-    // Notify that bot is online
-    _, err = dg.ChannelMessageSend(discordChannelID, "🟢 Sankarea bot is online and ready. Use /setnewsinterval to control posting frequency.")
-    if err != nil {
-        log.Printf("Failed to send startup message: %v", err)
-    }
+	currentConfig, err = loadConfig()
+	if err != nil {
+		log.Fatalf("Failed to load config.json: %v", err)
+	}
 
-    // Setup and start cron scheduler
-    cronJob = cron.New()
+	auditLogChannelID = currentConfig.AuditLogChannelID
 
-    // Schedule RSS feed posting
-    ScheduleRSSPosting(cronJob, dg, discordChannelID, sources)
+	state, err = loadState()
+	if err != nil {
+		log.Printf("Failed to load state, using defaults: %v", err)
+		state = State{
+			Paused:      false,
+			LastInterval: 15,
+			Version:      "1.0.0",
+			StartupTime:  time.Now().Format(time.RFC3339),
+		}
+	}
 
-    // Schedule article posting every 2 hours
-    ScheduleArticlePosting(cronJob, dg, discordChannelID, sources)
+	dg, err = discordgo.New("Bot " + discordBotToken)
+	if err != nil {
+		log.Fatalf("Error creating Discord session: %v", err)
+	}
 
-    cronJob.Start()
+	if discordOwnerID == "" {
+		guild, err := dg.Guild(discordGuildID)
+		if err == nil {
+			discordOwnerID = guild.OwnerID
+		}
+	}
 
-    // Handle graceful shutdown on interrupt signals
-    stop := make(chan os.Signal, 1)
-    signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
-    fmt.Println("Sankarea bot is running. Press CTRL+C to exit.")
-    <-stop
-    fmt.Println("Received shutdown signal, closing...")
+	dg.AddHandler(func(s *discordgo.Session, i *discordgo.InteractionCreate) {
+		handleCommands(s, i)
+	})
 
-    cronJob.Stop()
-    _ = SaveState(state)
+	err = dg.Open()
+	if err != nil {
+		log.Fatalf("Error opening connection to Discord: %v", err)
+	}
+	defer dg.Close()
+
+	logf("Registering slash commands...")
+	if err := registerCommands(dg, discordAppID, discordGuildID); err != nil {
+		logf("Failed to register commands: %v", err)
+	}
+
+	_, err = dg.ChannelMessageSend(discordChannelID, "🟢 Sankarea bot is online and ready.")
+	if err != nil {
+		logf("Failed to send startup message: %v", err)
+	}
+
+	cronJob = cron.New()
+	minutes := 15
+	_, err = fmt.Sscanf(currentConfig.News15MinCron, "*/%d * * * *", &minutes)
+	if err != nil || minutes < 15 || minutes > 360 {
+		minutes = 15
+	}
+	updateCronJob(minutes)
+
+	if currentConfig.NewsDigestCron != "" {
+		_, err = cronJob.AddFunc(currentConfig.NewsDigestCron, func() {
+			postNewsDigest(dg, discordChannelID, sources)
+		})
+		if err != nil {
+			logf("Failed to schedule news digest: %v", err)
+		}
+	}
+
+	cronJob.Start()
+	fetchAndPostNews(dg, discordChannelID, sources)
+
+	go backupScheduler()
+
+	logf("Sankarea bot running. Press CTRL+C to exit.")
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	<-stop
+	logf("Sankarea bot shutting down...")
 }
