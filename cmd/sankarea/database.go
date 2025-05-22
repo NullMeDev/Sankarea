@@ -51,6 +51,22 @@ func InitDB() error {
 			api_cost REAL DEFAULT 0,
 			errors INTEGER DEFAULT 0
 		)`,
+		`CREATE TABLE IF NOT EXISTS user_preferences (
+			user_id TEXT PRIMARY KEY,
+			saved_articles TEXT,
+			preferred_categories TEXT,
+			preferred_sources TEXT,
+			notification_enabled BOOLEAN DEFAULT 0,
+			theme TEXT DEFAULT 'light'
+		)`,
+		`CREATE TABLE IF NOT EXISTS topic_mentions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			topic_name TEXT NOT NULL,
+			article_id INTEGER NOT NULL,
+			mention_count INTEGER DEFAULT 1,
+			mentioned_at DATETIME NOT NULL,
+			FOREIGN KEY(article_id) REFERENCES articles(id)
+		)`,
 	}
 
 	for _, query := range createTables {
@@ -120,95 +136,194 @@ func AddFactCheck(articleID int64, claim, rating, source string) error {
 		article_id, claim, rating, source, checked_at
 	) VALUES (?, ?, ?, ?, ?)`
 
-	_, err := db.Exec(query, articleID, claim, rating, source, time.Now())
+	_, err := db.Exec(query, 
+		articleID, claim, rating, source, time.Now())
+	
 	return err
 }
 
-// updateDailyAnalytics updates the daily analytics record
-func updateDailyAnalytics(field string, increment float64) error {
-	today := time.Now().Format("2006-01-02")
+// GetArticlesByCategory gets articles by category within a time range
+func GetArticlesByCategory(category string, hours int) ([]ArticleDigest, error) {
+	query := `
+		SELECT 
+			title, url, source_name, published_at, category
+		FROM 
+			articles
+		WHERE 
+			category = ? AND published_at > ?
+		ORDER BY 
+			published_at DESC
+	`
 	
-	// First try to update existing record
-	query := fmt.Sprintf("UPDATE analytics SET %s = %s + ? WHERE date = ?", field, field)
-	result, err := db.Exec(query, increment, today)
-	if err != nil {
-		return err
-	}
-	
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	
-	// If no record exists for today, create one
-	if rowsAffected == 0 {
-		query := fmt.Sprintf("INSERT INTO analytics (date, %s) VALUES (?, ?)", field)
-		_, err = db.Exec(query, today, increment)
-		return err
-	}
-	
-	return nil
-}
-
-// GetTopArticles retrieves the top N articles by sentiment or fact check score
-func GetTopArticles(limit int, sortBy string) ([]struct {
-	Title     string
-	URL       string
-	Source    string
-	Published time.Time
-	Score     float64
-}, error) {
-	var orderBy string
-	switch sortBy {
-	case "sentiment":
-		orderBy = "sentiment DESC"
-	case "factcheck":
-		orderBy = "fact_check_score DESC"
-	default:
-		orderBy = "published_at DESC"
-	}
-	
-	query := fmt.Sprintf(`SELECT title, url, source_name, published_at, %s AS score 
-		FROM articles ORDER BY %s LIMIT ?`, 
-		strings.Split(sortBy, " ")[0], orderBy)
-	
-	rows, err := db.Query(query, limit)
+	since := time.Now().Add(-time.Duration(hours) * time.Hour)
+	rows, err := db.Query(query, category, since)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	
-	var results []struct {
-		Title     string
-		URL       string
-		Source    string
-		Published time.Time
-		Score     float64
-	}
-	
+	var articles []ArticleDigest
 	for rows.Next() {
-		var article struct {
-			Title     string
-			URL       string
-			Source    string
-			Published time.Time
-			Score     float64
-		}
+		var article ArticleDigest
+		var publishedStr string
 		
 		err := rows.Scan(
 			&article.Title,
 			&article.URL,
 			&article.Source,
-			&article.Published,
-			&article.Score,
+			&publishedStr,
+			&article.Category,
 		)
-		
 		if err != nil {
 			return nil, err
 		}
 		
-		results = append(results, article)
+		// Parse published time
+		article.Published, _ = time.Parse("2006-01-02 15:04:05", publishedStr)
+		
+		articles = append(articles, article)
 	}
 	
-	return results, nil
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	
+	return articles, nil
+}
+
+// GetTrendingTopics gets trending topics from recent articles
+func GetTrendingTopics(hours int) ([]struct{ Topic string; Count int }, error) {
+	query := `
+		SELECT 
+			topic_name, SUM(mention_count) as total_mentions
+		FROM 
+			topic_mentions
+		JOIN 
+			articles ON topic_mentions.article_id = articles.id
+		WHERE 
+			mentioned_at > ?
+		GROUP BY 
+			topic_name
+		ORDER BY 
+			total_mentions DESC
+		LIMIT 10
+	`
+	
+	since := time.Now().Add(-time.Duration(hours) * time.Hour)
+	rows, err := db.Query(query, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	
+	var topics []struct{ Topic string; Count int }
+	for rows.Next() {
+		var topic struct{ Topic string; Count int }
+		
+		err := rows.Scan(&topic.Topic, &topic.Count)
+		if err != nil {
+			return nil, err
+		}
+		
+		topics = append(topics, topic)
+	}
+	
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	
+	return topics, nil
+}
+
+// SaveUserPreference saves a user preference
+func SaveUserPreference(userID, prefType, value string) error {
+	query := `
+		INSERT INTO user_preferences (user_id, ` + prefType + `)
+		VALUES (?, ?)
+		ON CONFLICT(user_id) DO UPDATE SET ` + prefType + ` = ?
+	`
+	
+	_, err := db.Exec(query, userID, value, value)
+	return err
+}
+
+// GetUserPreference gets a user preference
+func GetUserPreference(userID, prefType string) (string, error) {
+	query := `SELECT ` + prefType + ` FROM user_preferences WHERE user_id = ?`
+	
+	var value string
+	err := db.QueryRow(query, userID).Scan(&value)
+	if err == sql.ErrNoRows {
+		return "", nil // No preference set
+	}
+	
+	return value, err
+}
+
+// updateDailyAnalytics updates analytics for today
+func updateDailyAnalytics(metric string, increment int) error {
+	if db == nil {
+		return nil // No database
+	}
+	
+	date := time.Now().Format("2006-01-02")
+	query := `
+		INSERT INTO analytics (date, ` + metric + `)
+		VALUES (?, ?)
+		ON CONFLICT(date) DO UPDATE SET ` + metric + ` = ` + metric + ` + ?
+	`
+	
+	_, err := db.Exec(query, date, increment, increment)
+	return err
+}
+
+// GetAnalytics gets analytics for a date range
+func GetAnalytics(startDate, endDate time.Time) (map[string]map[string]int, error) {
+	query := `
+		SELECT 
+			date, 
+			articles_processed, 
+			messages_sent,
+			api_calls, 
+			errors
+		FROM 
+			analytics
+		WHERE 
+			date BETWEEN ? AND ?
+		ORDER BY 
+			date
+	`
+	
+	rows, err := db.Query(query, 
+		startDate.Format("2006-01-02"), 
+		endDate.Format("2006-01-02"))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	
+	result := make(map[string]map[string]int)
+	
+	for rows.Next() {
+		var date string
+		var articlesProcessed, messagesSent, apiCalls, errors int
+		
+		err := rows.Scan(&date, &articlesProcessed, &messagesSent, &apiCalls, &errors)
+		if err != nil {
+			return nil, err
+		}
+		
+		result[date] = map[string]int{
+			"articles_processed": articlesProcessed,
+			"messages_sent":     messagesSent,
+			"api_calls":         apiCalls,
+			"errors":           errors,
+		}
+	}
+	
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	
+	return result, nil
 }
