@@ -1,12 +1,7 @@
 package main
 
-import (
-	"fmt"
-)
-
-// factCheck queries external APIs like Google Fact Check or ClaimBuster to validate a claim.
-// Currently a stub that returns a placeholder message.
+// factCheck is a stub for integrating a fact-check API
 func factCheck(claim string) string {
-	// TODO: Implement actual calls to Google Fact Check API and ClaimBuster API
-	return fmt.Sprintf("Fact-check result for: '%s'\n[API integration pending]", claim)
+    // TODO: integrate with your preferred API
+    return fmt.Sprintf("Fact-check for '%s': [TODO]", claim)
 }

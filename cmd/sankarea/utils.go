@@ -1,21 +1,66 @@
 package main
 
 import (
-	"fmt"
-	"time"
+    "bufio"
+    "log"
+    "os"
+    "strings"
 )
 
-// formatDuration returns a human-readable string for a time.Duration
-func formatDuration(d time.Duration) string {
-	h := int(d.Hours())
-	m := int(d.Minutes()) % 60
-	s := int(d.Seconds()) % 60
-	return fmt.Sprintf("%02dh %02dm %02ds", h, m, s)
+// LoadEnv reads a .env file and sets variables if not already in the environment
+func LoadEnv() {
+    if _, err := os.Stat(".env"); err == nil {
+        file, err := os.Open(".env")
+        if err == nil {
+            defer file.Close()
+            scanner := bufio.NewScanner(file)
+            for scanner.Scan() {
+                line := scanner.Text()
+                if strings.HasPrefix(line, "#") || len(strings.TrimSpace(line)) == 0 {
+                    continue
+                }
+                parts := strings.SplitN(line, "=", 2)
+                if len(parts) != 2 {
+                    continue
+                }
+                key := strings.TrimSpace(parts[0])
+                value := strings.Trim(strings.TrimSpace(parts[1]), ""'")
+                if os.Getenv(key) == "" {
+                    os.Setenv(key, value)
+                }
+            }
+        }
+    }
 }
 
-// isValidCronInterval validates a cron-style interval string in minutes (e.g., "*/15 * * * *")
-func isValidCronInterval(cronSpec string) bool {
-	var mins int
-	_, err := fmt.Sscanf(cronSpec, "*/%d * * * *", &mins)
-	return err == nil && mins >= 15 && mins <= 360
+// GetEnvOrFail retrieves an environment variable or fatals if missing
+func GetEnvOrFail(key string) string {
+    v := os.Getenv(key)
+    if v == "" {
+        log.Fatalf("Missing required environment variable: %s", key)
+    }
+    return v
+}
+
+// GetEnvOrDefault retrieves an environment variable or returns a default
+func GetEnvOrDefault(key, defaultValue string) string {
+    v := os.Getenv(key)
+    if v == "" {
+        return defaultValue
+    }
+    return v
+}
+
+// FileMustExist fatals if a required file is missing
+func FileMustExist(path string) {
+    if _, err := os.Stat(path); os.IsNotExist(err) {
+        log.Fatalf("ERROR: Required file not found: %s", path)
+    }
+}
+
+// EnsureDataDir creates the data directory if it doesn't exist
+func EnsureDataDir() {
+    if _, err := os.Stat("data"); os.IsNotExist(err) {
+        os.Mkdir("data", 0755)
+    }
 }
