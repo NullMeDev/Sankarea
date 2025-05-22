@@ -57,7 +57,7 @@ type ClaimBustersResult struct {
 // FactCheckArticle performs fact checking on an article
 func FactCheckArticle(title, content, articleURL string) (*FactCheckResult, error) {
 	// Make sure fact checking is enabled
-	if !cfg.EnableFactCheck {
+	if cfg == nil || !cfg.EnableFactCheck {
 		return nil, fmt.Errorf("Fact checking is disabled")
 	}
 	
@@ -102,43 +102,35 @@ func FactCheckArticle(title, content, articleURL string) (*FactCheckResult, erro
 	return nil, fmt.Errorf("All fact checking methods failed")
 }
 
-// extractFirstSentence extracts the first sentence from a string
+// extractFirstSentence extracts the first sentence from a text
 func extractFirstSentence(text string) string {
-	// Look for end of sentence markers
-	endMarkers := []string{". ", "! ", "? "}
-	
-	for _, marker := range endMarkers {
-		if idx := strings.Index(text, marker); idx > 0 {
-			return text[:idx+1] // Include the period
-		}
+	// Simple sentence extraction - look for period followed by space or end
+	parts := strings.SplitN(text, ". ", 2)
+	if len(parts) > 0 {
+		return parts[0]
 	}
-	
-	// If no markers found, limit to first 100 characters
-	if len(text) > 100 {
-		return text[:100] + "..."
-	}
-	
-	return text
+	return ""
 }
 
-// checkWithGoogleFactCheck checks a claim with Google Fact Check Tools
+// checkWithGoogleFactCheck performs fact checking using Google Fact Check API
 func checkWithGoogleFactCheck(claim string) (*FactCheckResult, error) {
-	// Prepare API call
-	apiURL := "https://factchecktools.googleapis.com/v1alpha1/claims:search"
-	req, err := http.NewRequest("GET", apiURL, nil)
-	if err != nil {
-		return nil, err
+	// Create a URL-safe version of the claim
+	encodedClaim := url.QueryEscape(claim)
+	
+	// Build the API request URL
+	apiURL := fmt.Sprintf(
+		"https://factchecktools.googleapis.com/v1alpha1/claims:search?query=%s&key=%s",
+		encodedClaim,
+		cfg.GoogleFactCheckAPIKey,
+	)
+	
+	// Create HTTP client with timeout
+	client := &http.Client{
+		Timeout: 10 * time.Second,
 	}
 	
-	// Add query parameters
-	q := req.URL.Query()
-	q.Add("key", cfg.GoogleFactCheckAPIKey)
-	q.Add("query", claim)
-	req.URL.RawQuery = q.Encode()
-	
 	// Make the request
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := client.Get(apiURL)
 	if err != nil {
 		return nil, err
 	}
@@ -146,71 +138,77 @@ func checkWithGoogleFactCheck(claim string) (*FactCheckResult, error) {
 	
 	// Check response status
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Google API returned status code %d", resp.StatusCode)
+		return nil, fmt.Errorf("Google Fact Check API returned status: %s", resp.Status)
 	}
 	
-	// Parse response
+	// Read and parse response
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
 	
 	var result GoogleFactCheckResult
-	err = json.Unmarshal(body, &result)
-	if err != nil {
+	if err := json.Unmarshal(body, &result); err != nil {
 		return nil, err
 	}
 	
-	// Process the result
+	// Check if we have any claims
 	if len(result.Claims) == 0 {
 		return nil, fmt.Errorf("No fact check results found")
 	}
 	
-	// Get the first claim
-	claim = result.Claims[0]
+	// Get the first claim result
+	firstClaim := result.Claims[0]
 	
-	// Map rating to trust score
-	trustScore := 0.5 // Default neutral
-	if claim.ClaimRating.RatingValue != 0 {
-		// Normalize the rating to 0-1 scale
-		trustScore = claim.ClaimRating.RatingValue / 5.0
+	// Create a fact check result
+	factCheck := &FactCheckResult{
+		Claim:       firstClaim.ClaimReviewed,
+		Rating:      firstClaim.ClaimRating.TextualRating,
+		TrustScore:  firstClaim.ClaimRating.RatingValue / 5.0, // Normalize to 0-1
+		Method:      "Google Fact Check Tools API",
+		CheckedAt:   time.Now(),
 	}
 	
-	// Create result
-	factResult := &FactCheckResult{
-		Claim:      claim.Text,
-		Rating:     claim.ClaimRating.TextualRating,
-		Source:     "Unknown",
-		TrustScore: trustScore,
-		Method:     "Google Fact Check",
-		CheckedAt:  time.Now(),
+	// Add source if available
+	if len(firstClaim.ClaimReviewers) > 0 {
+		factCheck.Source = firstClaim.ClaimReviewers[0].Name
+		factCheck.URL = firstClaim.ClaimReviewers[0].URL
 	}
 	
-	// Add reviewer info if available
-	if len(claim.ClaimReviewers) > 0 {
-		factResult.Source = claim.ClaimReviewers[0].Name
-		factResult.URL = claim.ClaimReviewers[0].URL
-	}
-	
-	return factResult, nil
+	return factCheck, nil
 }
 
-// checkWithClaimBusters checks a claim with ClaimBusters API
+// checkWithClaimBusters performs fact checking using ClaimBusters API
 func checkWithClaimBusters(claim string) (*FactCheckResult, error) {
+	// Build API request URL
 	apiURL := "https://idir.uta.edu/claimbuster/api/v2/score/text/"
 	
-	// Prepare API call
-	encodedClaim := url.QueryEscape(claim)
-	req, err := http.NewRequest("GET", apiURL+encodedClaim, nil)
+	// Create request body
+	reqBody := map[string]string{
+		"text": claim,
+	}
+	
+	jsonData, err := json.Marshal(reqBody)
 	if err != nil {
 		return nil, err
 	}
 	
-	// Add API key header
-	req.Header.Add("x-api-key", cfg.ClaimBustersAPIKey)
+	// Create request
+	req, err := http.NewRequest("POST", apiURL, strings.NewReader(string(jsonData)))
+	if err != nil {
+		return nil, err
+	}
+	
+	// Set headers
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", cfg.ClaimBustersAPIKey)
+	
+	// Create HTTP client with timeout
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+	}
 	
 	// Make the request
-	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -219,79 +217,61 @@ func checkWithClaimBusters(claim string) (*FactCheckResult, error) {
 	
 	// Check response status
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("ClaimBusters API returned status code %d", resp.StatusCode)
+		return nil, fmt.Errorf("ClaimBusters API returned status: %s", resp.Status)
 	}
 	
-	// Parse response
+	// Read and parse response
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
 	
 	var result ClaimBustersResult
-	err = json.Unmarshal(body, &result)
-	if err != nil {
+	if err := json.Unmarshal(body, &result); err != nil {
 		return nil, err
 	}
 	
-	// Map claim score to rating and trust score
-	rating := "Unknown"
-	trustScore := result.ClaimScore
-	
-	if trustScore > 0.8 {
-		rating = "Highly Checkable Claim"
-	} else if trustScore > 0.6 {
-		rating = "Checkable Claim"
-	} else if trustScore > 0.4 {
-		rating = "Uncertain"
-	} else if trustScore > 0.2 {
-		rating = "Not Very Checkable"
-	} else {
-		rating = "Not a Claim"
-	}
-	
-	// Create result
-	factResult := &FactCheckResult{
+	// Create fact check result
+	factCheck := &FactCheckResult{
 		Claim:       claim,
-		Rating:      rating,
-		Source:      "ClaimBusters",
+		Rating:      result.Rating,
 		Explanation: result.Explanation,
-		TrustScore:  trustScore,
-		Method:      "ClaimBusters",
+		TrustScore:  result.ClaimScore,
+		Method:      "ClaimBusters API",
 		CheckedAt:   time.Now(),
 	}
 	
-	// Add source info if available
+	// Add source if available
 	if len(result.Sources) > 0 {
-		factResult.Source = result.Sources[0].Name
-		factResult.URL = result.Sources[0].URL
+		factCheck.Source = result.Sources[0].Name
+		factCheck.URL = result.Sources[0].URL
 	}
 	
-	return factResult, nil
+	return factCheck, nil
 }
 
-// checkWithOpenAI uses OpenAI API to analyze claims in text
-func checkWithOpenAI(claim, articleURL string) (*FactCheckResult, error) {
+// checkWithOpenAI performs fact checking using OpenAI API
+func checkWithOpenAI(claim string, articleURL string) (*FactCheckResult, error) {
 	if cfg.OpenAIAPIKey == "" {
 		return nil, fmt.Errorf("OpenAI API key not configured")
 	}
 	
 	client := openai.NewClient(cfg.OpenAIAPIKey)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*30)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-
-	// Prepare system prompt for fact checking
-	systemPrompt := `You are a fact checking assistant. Analyze the claim provided and determine:
-1. Is it factually checkable (vs opinion)
-2. Does it contain any obvious factual inaccuracies
-3. Assign a rating from: "False", "Mostly False", "Mixed", "Mostly True", "True", or "Uncertain"
-4. Provide a brief explanation of your rating
+	
+	// Create prompt for fact checking
+	systemPrompt := `You are a fact-checking AI assistant. Analyze the following claim and provide:
+1. A factual rating (True, Mostly True, Mixed, Mostly False, False, Unverifiable)
+2. A brief explanation of your rating
+3. A trust score between 0.0 (completely false) and 1.0 (completely true)
 
 Format your response as JSON with these fields:
-- rating: one of the ratings listed above
-- explanation: brief explanation of why you gave this rating
-- trust_score: a number between 0 (completely false) and 1 (completely true), or 0.5 if uncertain
-- is_opinion: boolean indicating if this is primarily an opinion rather than a factual claim`
+{
+  "rating": "rating here",
+  "explanation": "explanation here",
+  "trust_score": 0.5
+}`
 
 	// Create completion request
 	resp, err := client.CreateChatCompletion(
@@ -305,42 +285,48 @@ Format your response as JSON with these fields:
 				},
 				{
 					Role:    "user",
-					Content: fmt.Sprintf("Analyze this claim: \"%s\"\nArticle URL: %s", claim, articleURL),
+					Content: fmt.Sprintf("Fact check this claim: %s\nSource URL: %s", claim, articleURL),
 				},
 			},
-			Temperature: 0.2, // Low temperature for more consistent results
+			Temperature: 0.2,
+			ResponseFormat: &openai.ChatCompletionResponseFormat{
+				Type: openai.ChatCompletionResponseFormatTypeJSONObject,
+			},
 		},
 	)
 	if err != nil {
-		return nil, fmt.Errorf("OpenAI API error: %v", err)
+		return nil, err
 	}
 
-	// Update API usage cost
-	updateOpenAIUsageCost(resp.Usage.TotalTokens)
-
-	// Parse the JSON response
+	// Parse response
 	jsonResponse := resp.Choices[0].Message.Content
 	jsonResponse = strings.TrimSpace(jsonResponse)
 
-	// Sometimes GPT wraps results in code blocks, remove those
-	jsonResponse = strings.TrimPrefix(jsonResponse, "```json")
-	jsonResponse = strings.TrimPrefix(jsonResponse, "```")
-	jsonResponse = strings.TrimSuffix(jsonResponse, "```")
-	jsonResponse = strings.TrimSpace(jsonResponse)
-
+	// Parse the response JSON
 	var result struct {
 		Rating      string  `json:"rating"`
 		Explanation string  `json:"explanation"`
 		TrustScore  float64 `json:"trust_score"`
-		IsOpinion   bool    `json:"is_opinion"`
 	}
 
-	err = json.Unmarshal([]byte(jsonResponse), &result)
-	if err != nil {
-		return nil, fmt.Errorf("Failed to parse AI response: %v", err)
+	if err := json.Unmarshal([]byte(jsonResponse), &result); err != nil {
+		return nil, fmt.Errorf("Failed to parse OpenAI response: %v", err)
 	}
 
 	// Create fact check result
-	factResult := &FactCheckResult{
+	return &FactCheckResult{
 		Claim:       claim,
-		Rating:
+		Rating:      result.Rating,
+		Explanation: result.Explanation,
+		TrustScore:  result.TrustScore,
+		Method:      "OpenAI Analysis",
+		CheckedAt:   time.Now(),
+		URL:         articleURL,
+	}, nil
+}
+
+// UpdateOpenAIUsageCost tracks OpenAI API usage (placeholder function)
+func updateOpenAIUsageCost(tokens int) {
+	// This function would be implemented to track API usage costs
+	Logger().Printf("OpenAI API usage: %d tokens", tokens)
+}
