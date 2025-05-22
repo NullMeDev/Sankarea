@@ -30,6 +30,8 @@ type State struct {
 	DigestNextTime time.Time `json:"digestNextTime"`
 	Version       string    `json:"version"`
 	LastInterval  int       `json:"lastInterval"`
+	TotalArticles int       `json:"totalArticles"`
+	LastDigest    time.Time `json:"lastDigest"`
 }
 
 // LoadState loads the application state from file
@@ -90,11 +92,6 @@ func SaveState(s *State) error {
 	return os.WriteFile(stateFilePath, data, 0644)
 }
 
-// EnsureDataDir ensures the data directory exists
-func EnsureDataDir() error {
-	return os.MkdirAll("data", 0755)
-}
-
 // UpdateNewsNextTime updates the time for the next news fetch
 func UpdateNewsNextTime(minutes int) {
 	stateMutex.Lock()
@@ -144,18 +141,10 @@ func SetPaused(paused bool) {
 	state.Paused = paused
 }
 
-// IsPaused returns whether the system is paused
-func IsPaused() bool {
+// GetPaused gets the current paused state
+func GetPaused() bool {
 	stateMutex.Lock()
 	defer stateMutex.Unlock()
-
+	
 	return state.Paused
-}
-
-// GetUptime returns the current uptime of the application
-func GetUptime() time.Duration {
-	stateMutex.Lock()
-	defer stateMutex.Unlock()
-
-	return time.Since(state.StartupTime)
 }
