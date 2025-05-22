@@ -141,24 +141,25 @@ func LoadConfig() (*Config, error) {
 		}
 		
 		// Check for environment variables to override defaults
-		if token := os.Getenv("DISCORD_BOT_TOKEN"); token != "" {
+		// Trim whitespace to avoid accidental issues
+		if token := strings.TrimSpace(os.Getenv("DISCORD_BOT_TOKEN")); token != "" {
 			defaultConfig.BotToken = token
 		}
 		
-		if appID := os.Getenv("DISCORD_APPLICATION_ID"); appID != "" {
+		if appID := strings.TrimSpace(os.Getenv("DISCORD_APPLICATION_ID")); appID != "" {
 			defaultConfig.AppID = appID
 		}
 		
-		if guildID := os.Getenv("DISCORD_GUILD_ID"); guildID != "" {
+		if guildID := strings.TrimSpace(os.Getenv("DISCORD_GUILD_ID")); guildID != "" {
 			defaultConfig.GuildID = guildID
 		}
 		
-		if channelID := os.Getenv("DISCORD_CHANNEL_ID"); channelID != "" {
+		if channelID := strings.TrimSpace(os.Getenv("DISCORD_CHANNEL_ID")); channelID != "" {
 			defaultConfig.NewsChannelID = channelID
 			defaultConfig.DigestChannelID = channelID
 		}
 		
-		if openAIKey := os.Getenv("OPENAI_API_KEY"); openAIKey != "" {
+		if openAIKey := strings.TrimSpace(os.Getenv("OPENAI_API_KEY")); openAIKey != "" {
 			defaultConfig.OpenAIAPIKey = openAIKey
 			defaultConfig.EnableSummarization = true
 		}
@@ -203,8 +204,14 @@ func SaveConfig(config *Config) error {
 		return err
 	}
 	
-	// Write to file
-	return os.WriteFile(configFilePath, data, 0644)
+	// Write to file atomically to prevent corruption
+	tempFile := configFilePath + ".tmp"
+	if err := os.WriteFile(tempFile, data, 0644); err != nil {
+		return err
+	}
+	
+	// Then rename to the actual file (atomic operation on most file systems)
+	return os.Rename(tempFile, configFilePath)
 }
 
 // LoadSources loads RSS feed sources from the sources.yml file
@@ -272,8 +279,14 @@ func SaveSources(sources []Source) error {
 		return err
 	}
 	
-	// Write to file
-	return os.WriteFile(sourcesFilePath, data, 0644)
+	// Write to file atomically to prevent corruption
+	tempFile := sourcesFilePath + ".tmp"
+	if err := os.WriteFile(tempFile, data, 0644); err != nil {
+		return err
+	}
+	
+	// Then rename to the actual file (atomic operation on most file systems)
+	return os.Rename(tempFile, sourcesFilePath)
 }
 
 // ConfigManager watches for config changes and reloads when necessary
@@ -308,6 +321,8 @@ func (m *ConfigManager) SetReloadHandler(handler func(*Config)) {
 // StartWatching starts watching for config changes
 func (m *ConfigManager) StartWatching() {
 	go func() {
+		defer RecoverFromPanic("config-watcher")
+		
 		ticker := time.NewTicker(m.checkInterval)
 		defer ticker.Stop()
 		
