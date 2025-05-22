@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -208,14 +209,14 @@ func SaveConfig(config *Config) error {
 
 // LoadSources loads RSS feed sources from the sources.yml file
 func LoadSources() ([]Source, error) {
-	// Check if file exists, create empty file if not
+	// Check if file exists, create if not
 	if _, err := os.Stat(sourcesFilePath); os.IsNotExist(err) {
 		if err := os.MkdirAll(filepath.Dir(sourcesFilePath), 0755); err != nil {
 			return nil, err
 		}
 		
-		// Create empty file with empty sources array
-		if err := os.WriteFile(sourcesFilePath, []byte("[]"), 0644); err != nil {
+		// Create empty file with empty YAML sources array
+		if err := os.WriteFile(sourcesFilePath, []byte("sources: []"), 0644); err != nil {
 			return nil, err
 		}
 		
@@ -228,19 +229,27 @@ func LoadSources() ([]Source, error) {
 		return nil, err
 	}
 	
-	var sources []Source
+	var sources struct {
+		Sources []Source `yaml:"sources"`
+	}
+	
 	if err := yaml.Unmarshal(data, &sources); err != nil {
-		return nil, err
+		// Try with direct unmarshaling if the structure doesn't match
+		var directSources []Source
+		if err := yaml.Unmarshal(data, &directSources); err != nil {
+			return nil, fmt.Errorf("failed to parse sources file: %w", err)
+		}
+		sources.Sources = directSources
 	}
 	
 	// Ensure all sources have active flag set properly
-	for i := range sources {
-		if !sources[i].Paused && sources[i].Active == false {
-			sources[i].Active = true
+	for i := range sources.Sources {
+		if !sources.Sources[i].Paused && sources.Sources[i].Active == false {
+			sources.Sources[i].Active = true
 		}
 	}
 	
-	return sources, nil
+	return sources.Sources, nil
 }
 
 // SaveSources saves RSS feed sources to the sources.yml file
@@ -250,8 +259,15 @@ func SaveSources(sources []Source) error {
 		return err
 	}
 	
+	// Wrap sources in a proper YAML structure
+	wrappedSources := struct {
+		Sources []Source `yaml:"sources"`
+	}{
+		Sources: sources,
+	}
+	
 	// Marshal sources to YAML
-	data, err := yaml.Marshal(sources)
+	data, err := yaml.Marshal(wrappedSources)
 	if err != nil {
 		return err
 	}
@@ -262,11 +278,11 @@ func SaveSources(sources []Source) error {
 
 // ConfigManager watches for config changes and reloads when necessary
 type ConfigManager struct {
-	configPath   string
+	configPath    string
 	checkInterval time.Duration
-	lastModTime  time.Time
+	lastModTime   time.Time
 	reloadHandler func(*Config)
-	stopChan     chan struct{}
+	stopChan      chan struct{}
 }
 
 // NewConfigManager creates a new config manager
