@@ -1,4 +1,10 @@
 {
+  "bot_token": "",
+  "app_id": "",
+  "guild_id": "",
   "news15MinCron": "*/15 * * * *",
-  "auditLogChannelId": "1374629215638519909"
+  "auditLogChannelId": "",
+  "newsDigestCron": "0 8 * * *",
+  "maxPostsPerSource": 5,
+  "version": "0.1.0"
 }
