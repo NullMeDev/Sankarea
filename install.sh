@@ -10,9 +10,12 @@ if ! command -v go &> /dev/null; then
     exit 1
 fi
 
-# Check Go version
-GO_VERSION=$(go version | grep -oP 'go\K[0-9]+\.[0-9]+')
-if (( $(echo "$GO_VERSION < 1.21" | bc -l) )); then
+# Check Go version (platform independent method)
+GO_VERSION=$(go version | awk '{print $3}' | sed 's/go//')
+GO_MAJOR=$(echo $GO_VERSION | cut -d. -f1)
+GO_MINOR=$(echo $GO_VERSION | cut -d. -f2)
+
+if [ "$GO_MAJOR" -lt 1 ] || [ "$GO_MAJOR" -eq 1 -a "$GO_MINOR" -lt 21 ]; then
     echo "❌ Go version $GO_VERSION is too old. Please upgrade to Go 1.21 or later."
     exit 1
 fi
@@ -66,7 +69,11 @@ fi
 
 # Install dependencies
 echo "Installing dependencies..."
-go mod init sankarea
+# Check if go.mod exists before initializing
+if [ ! -f "go.mod" ]; then
+    go mod init sankarea
+fi
+
 go mod tidy
 go get github.com/bwmarrin/discordgo
 go get github.com/mmcdole/gofeed
@@ -76,6 +83,8 @@ go get github.com/mattn/go-sqlite3
 go get gopkg.in/yaml.v2
 
 echo "Building application..."
+# Ensure bin directory exists
+mkdir -p bin
 go build -o bin/sankarea cmd/sankarea/*.go
 
 echo "✅ Setup complete!"
