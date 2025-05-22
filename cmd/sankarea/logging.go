@@ -15,23 +15,21 @@ var (
     logFile *os.File
 )
 
-// SetupLogging initializes logging to both console and a dated log file
+// SetupLogging initializes console + file logger
 func SetupLogging() error {
-    if _, err := os.Stat("logs"); os.IsNotExist(err) {
-        if err := os.Mkdir("logs", 0755); err != nil {
-            return err
-        }
+    if err := os.MkdirAll("logs", 0755); err != nil {
+        return err
     }
-    logFileName := fmt.Sprintf("logs/sankarea_%s.log", time.Now().Format("2006-01-02"))
+    name := fmt.Sprintf("logs/sankarea_%s.log", time.Now().Format("2006-01-02"))
     var err error
-    logFile, err = os.OpenFile(logFileName, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+    logFile, err = os.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
     if err != nil {
         return err
     }
     mw := io.MultiWriter(os.Stdout, logFile)
-    logger = log.New(mw, "", log.Ldate|log.Ltime)
+    logger = log.New(mw, "", log.Ldate|log.Ltime|log.Lshortfile)
     log.SetOutput(mw)
-    log.SetFlags(log.Ldate | log.Ltime)
+    log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
     return nil
 }
 
@@ -41,7 +39,7 @@ func Logf(format string, args ...interface{}) {
     logger.Printf("%s:%d: %s", filepath.Base(file), line, fmt.Sprintf(format, args...))
 }
 
-// Logger gives access to the underlying logger
+// Logger returns the underlying *log.Logger
 func Logger() *log.Logger {
     return logger
 }
