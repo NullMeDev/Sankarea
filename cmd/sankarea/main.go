@@ -103,6 +103,10 @@ func main() {
 	initializeSubsystems()
 
 	// Initialize discord connection
+	if cfg.BotToken == "" {
+		errorSystem.HandleError("Discord bot token is empty", fmt.Errorf("BotToken not set"), "discord", ErrorSeverityFatal)
+	}
+	
 	dg, err = discordgo.New("Bot " + cfg.BotToken)
 	if err != nil {
 		errorSystem.HandleError("Failed to create Discord session", err, "discord", ErrorSeverityFatal)
@@ -223,6 +227,7 @@ func EnsureDirectories() {
 		"data/cache",
 		"dashboard/templates",
 		"dashboard/static",
+		"bin", // Add bin directory for build output
 	}
 
 	for _, dir := range dirs {
@@ -254,7 +259,13 @@ func handleReady(s *discordgo.Session, r *discordgo.Ready) {
 	// Run an immediate news fetch if enabled
 	if cfg.FetchNewsOnStartup {
 		Logger().Println("Performing initial news fetch...")
-		go fetchAllNews(s)
+		go func() {
+			defer RecoverFromPanic("initial-news-fetch")
+			if err := fetchAllNews(s); err != nil {
+				Logger().Printf("Error during initial news fetch: %v", err)
+				errorSystem.HandleError("Initial news fetch failed", err, "news-fetch", ErrorSeverityMedium)
+			}
+		}()
 	}
 }
 
@@ -264,7 +275,10 @@ func startNewsUpdateCron() {
 	// Schedule news updates based on configuration
 	if cfg.News15MinCron != "" {
 		_, err := cronManager.AddFunc(cfg.News15MinCron, func() {
-			fetchAllNews(dg)
+			if err := fetchAllNews(dg); err != nil {
+				Logger().Printf("Error during scheduled news fetch: %v", err)
+				errorSystem.HandleError("Scheduled news fetch failed", err, "news-fetch", ErrorSeverityMedium)
+			}
 		})
 		
 		if err != nil {
@@ -275,7 +289,10 @@ func startNewsUpdateCron() {
 	} else {
 		// Default to every 15 minutes if not specified
 		_, err := cronManager.AddFunc("*/15 * * * *", func() {
-			fetchAllNews(dg)
+			if err := fetchAllNews(dg); err != nil {
+				Logger().Printf("Error during default scheduled news fetch: %v", err)
+				errorSystem.HandleError("Default scheduled news fetch failed", err, "news-fetch", ErrorSeverityMedium)
+			}
 		})
 		
 		if err != nil {
@@ -289,29 +306,31 @@ func startNewsUpdateCron() {
 	cronManager.Start()
 }
 
-func fetchAllNews(s *discordgo.Session) {
+func fetchAllNews(s *discordgo.Session) error {
 	sources, err := LoadSources()
 	if err != nil {
 		Logger().Printf("Error loading sources: %v", err)
-		return
+		return fmt.Errorf("failed to load sources: %w", err)
 	}
 	
 	state, err := LoadState()
 	if err != nil {
 		Logger().Printf("Error loading state: %v", err)
-		return
+		return fmt.Errorf("failed to load state: %w", err)
 	}
 	
 	if state.Paused {
 		Logger().Println("News fetching is currently paused")
-		return
+		return nil
 	}
 	
-	fetchAndPostNews(s, cfg.NewsChannelID, sources)
+	if err := fetchAndPostNews(s, cfg.NewsChannelID, sources); err != nil {
+		return fmt.Errorf("failed to fetch and post news: %w", err)
+	}
 	
 	// Update state
 	state.LastFetchTime = time.Now()
-	SaveState(state)
+	return SaveState(state)
 }
 
 func registerCommands() {
@@ -678,6 +697,12 @@ func registerCommands() {
 		},
 	}
 
+	// Register commands - check if AppID is set first
+	if cfg.AppID == "" {
+		Logger().Println("Warning: Application ID is not set, cannot register commands")
+		return
+	}
+
 	// Register commands
 	if cfg.GuildID != "" {
 		// Guild commands update instantly
@@ -717,7 +742,10 @@ func handleMessage(s *discordgo.Session, m *discordgo.MessageCreate) {
 	
 	// Track any keywords in the message
 	if keywordTracker != nil {
-		go keywordTracker.CheckForKeywords(m.Content)
+		go func() {
+			defer RecoverFromPanic("keyword-tracker")
+			keywordTracker.CheckForKeywords(m.Content)
+		}()
 	}
 }
 
@@ -751,20 +779,28 @@ func saveAllData() {
 		Logger().Printf("Error loading state for save: %v", err)
 	} else {
 		state.ShutdownTime = time.Now()
-		SaveState(state)
+		if err := SaveState(state); err != nil {
+			Logger().Printf("Error saving state during shutdown: %v", err)
+		}
 	}
 
 	// Save any pending data from subsystems
 	if keywordTracker != nil {
-		keywordTracker.Save()
+		if err := keywordTracker.Save(); err != nil {
+			Logger().Printf("Error saving keyword data: %v", err)
+		}
 	}
 
 	if analyticsEngine != nil {
-		analyticsEngine.Save()
+		if err := analyticsEngine.Save(); err != nil {
+			Logger().Printf("Error saving analytics data: %v", err)
+		}
 	}
 
 	if credScorer != nil {
-		credScorer.Save()
+		if err := credScorer.Save(); err != nil {
+			Logger().Printf("Error saving credibility data: %v", err)
+		}
 	}
 
 	Logger().Println("Data saved successfully")
@@ -774,11 +810,15 @@ func saveAllData() {
 func RecoverFromPanic(component string) {
 	if r := recover(); r != nil {
 		Logger().Printf("PANIC RECOVERED in %s: %v", component, r)
-		errorSystem.HandleError(
-			fmt.Sprintf("Panic in %s", component),
-			fmt.Errorf("%v", r),
-			component,
-			ErrorSeverityHigh,
-		)
+		if errorSystem != nil {
+			errorSystem.HandleError(
+				fmt.Sprintf("Panic in %s", component),
+				fmt.Errorf("%v", r),
+				component,
+				ErrorSeverityHigh,
+			)
+		} else {
+			log.Printf("ERROR SYSTEM NOT INITIALIZED: Panic in %s: %v", component, r)
+		}
 	}
 }
