@@ -1,4 +1,4 @@
-// Current Date and Time (UTC): 2025-05-22 15:14:41
+// Current Date and Time (UTC): 2025-05-22 21:16:14
 // Current User's Login: NullMeDev
 // File name: tools/validate_feeds.go
 
@@ -6,7 +6,7 @@ package main
 
 import (
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -30,7 +30,7 @@ func main() {
 	fmt.Println("Validating all feeds in sources.yml")
 	
 	// Read sources file
-	data, err := ioutil.ReadFile("config/sources.yml")
+	data, err := os.ReadFile("config/sources.yml")
 	if err != nil {
 		fmt.Printf("Error reading sources file: %v\n", err)
 		os.Exit(1)
@@ -114,7 +114,7 @@ func main() {
 				return
 			}
 			
-			body, err := ioutil.ReadAll(resp.Body)
+			body, err := io.ReadAll(resp.Body)
 			if err != nil {
 				results <- Result{
 					Source:  src,
