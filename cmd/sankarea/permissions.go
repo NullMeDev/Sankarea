@@ -4,6 +4,13 @@ import (
 	"github.com/bwmarrin/discordgo"
 )
 
+// Command permission levels
+const (
+	PermLevelEveryone = 0
+	PermLevelAdmin    = 1
+	PermLevelOwner    = 2
+)
+
 // CheckPermissionLevel checks if the user has the required permission level
 // Returns: permission level the user has (0=everyone, 1=admin, 2=owner)
 func CheckPermissionLevel(s *discordgo.Session, i *discordgo.InteractionCreate) int {
