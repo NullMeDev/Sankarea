@@ -1,0 +1,370 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"io/ioutil"
+	"log"
+	"net/http"
+	"os"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/bwmarrin/discordgo"
+	"github.com/mmcdole/gofeed"
+	"gopkg.in/yaml.v2"
+)
+
+// Source represents an RSS feed source (simplified for validation)
+type Source struct {
+	Name    string `yaml:"name"`
+	URL     string `yaml:"url"`
+	Active  bool   `yaml:"active"`
+	Paused  bool   `yaml:"paused"`
+}
+
+// Test represents a test case
+type Test struct {
+	Name        string
+	Description string
+	Run         func() TestResult
+}
+
+// TestResult represents the result of a test
+type TestResult struct {
+	Success bool
+	Message string
+	Error   error
+}
+
+func main() {
+	fmt.Println("Sankarea Integration Tests")
+	fmt.Println("=========================")
+	fmt.Println("Running tests on 2025-05-22 14:50:06 by NullMeDev")
+	
+	// Check if Discord token is provided
+	token := os.Getenv("DISCORD_BOT_TOKEN")
+	if token == "" {
+		fmt.Println("❌ DISCORD_BOT_TOKEN environment variable not set")
+		fmt.Println("Some tests will be skipped!")
+	}
+	
+	// Set up Discord session if token provided
+	var dg *discordgo.Session
+	if token != "" {
+		var err error
+		dg, err = discordgo.New("Bot " + token)
+		if err != nil {
+			log.Fatalf("Error creating Discord session: %v", err)
+		}
+		
+		err = dg.Open()
+		if err != nil {
+			log.Fatalf("Error opening Discord connection: %v", err)
+		}
+		defer dg.Close()
+	}
+	
+	// Define tests
+	tests := []Test{
+		{
+			Name:        "ConfigFilesExist",
+			Description: "Check if required config files exist",
+			Run:         TestConfigFilesExist,
+		},
+		{
+			Name:        "ParseSourcesYaml",
+			Description: "Validate sources.yml format",
+			Run:         TestParseSourcesYaml,
+		},
+		{
+			Name:        "FetchRSSFeeds",
+			Description: "Test if RSS feeds can be fetched",
+			Run:         TestFetchRSSFeeds,
+		},
+	}
+	
+	// Add Discord tests if token is provided
+	if token != "" {
+		tests = append(tests, []Test{
+			{
+				Name:        "DiscordConnection",
+				Description: "Test Discord connection",
+				Run: func() TestResult {
+					return TestDiscordConnection(dg)
+				},
+			},
+			{
+				Name:        "DiscordPermissions",
+				Description: "Test if bot has required permissions",
+				Run: func() TestResult {
+					return TestDiscordPermissions(dg)
+				},
+			},
+		}...)
+	}
+	
+	// Run tests
+	var passedCount, failedCount int
+	for _, test := range tests {
+		fmt.Printf("⏳ Running test: %s (%s)...\n", test.Name, test.Description)
+		
+		result := test.Run()
+		if result.Success {
+			fmt.Printf("✅ %s: %s\n", test.Name, result.Message)
+			passedCount++
+		} else {
+			fmt.Printf("❌ %s: %s\n", test.Name, result.Message)
+			if result.Error != nil {
+				fmt.Printf("   Error: %v\n", result.Error)
+			}
+			failedCount++
+		}
+		fmt.Println()
+	}
+	
+	// Print summary
+	fmt.Println("Test Summary")
+	fmt.Println("===========")
+	fmt.Printf("Total Tests: %d\n", len(tests))
+	fmt.Printf("Passed: %d\n", passedCount)
+	fmt.Printf("Failed: %d\n", failedCount)
+	
+	if failedCount > 0 {
+		os.Exit(1)
+	}
+}
+
+// TestConfigFilesExist checks if required config files exist
+func TestConfigFilesExist() TestResult {
+	requiredFiles := []string{
+		"config/config.json",
+		"config/sources.yml",
+	}
+	
+	missingFiles := []string{}
+	
+	for _, file := range requiredFiles {
+		if _, err := os.Stat(file); os.IsNotExist(err) {
+			missingFiles = append(missingFiles, file)
+		}
+	}
+	
+	if len(missingFiles) > 0 {
+		return TestResult{
+			Success: false,
+			Message: fmt.Sprintf("Missing required files: %s", strings.Join(missingFiles, ", ")),
+		}
+	}
+	
+	return TestResult{
+		Success: true,
+		Message: "All required config files exist",
+	}
+}
+
+// TestParseSourcesYaml validates sources.yml format
+func TestParseSourcesYaml() TestResult {
+	data, err := ioutil.ReadFile("config/sources.yml")
+	if err != nil {
+		return TestResult{
+			Success: false,
+			Message: "Could not read sources.yml",
+			Error:   err,
+		}
+	}
+	
+	var sources []Source
+	if err := yaml.Unmarshal(data, &sources); err != nil {
+		return TestResult{
+			Success: false,
+			Message: "Failed to parse sources.yml",
+			Error:   err,
+		}
+	}
+	
+	if len(sources) == 0 {
+		return TestResult{
+			Success: false,
+			Message: "No sources defined in sources.yml",
+		}
+	}
+	
+	return TestResult{
+		Success: true,
+		Message: fmt.Sprintf("Successfully parsed sources.yml with %d sources", len(sources)),
+	}
+}
+
+// TestFetchRSSFeeds tests fetching RSS feeds
+func TestFetchRSSFeeds() TestResult {
+	data, err := ioutil.ReadFile("config/sources.yml")
+	if err != nil {
+		return TestResult{
+			Success: false,
+			Message: "Could not read sources.yml",
+			Error:   err,
+		}
+	}
+	
+	var sources []Source
+	if err := yaml.Unmarshal(data, &sources); err != nil {
+		return TestResult{
+			Success: false,
+			Message: "Failed to parse sources.yml",
+			Error:   err,
+		}
+	}
+	
+	// Test the first 5 active sources
+	testCount := 0
+	successCount := 0
+	failureCount := 0
+	
+	parser := gofeed.NewParser()
+	parser.UserAgent = "Sankarea Integration Test/1.0"
+	
+	var wg sync.WaitGroup
+	results := make(chan string, len(sources))
+	errors := make(chan string, len(sources))
+	
+	for _, src := range sources {
+		if testCount >= 5 {
+			break
+		}
+		
+		if !src.Active || src.Paused {
+			continue
+		}
+		
+		wg.Add(1)
+		testCount++
+		
+		go func(source Source) {
+			defer wg.Done()
+			
+			feed, err := parser.ParseURL(source.URL)
+			if err != nil {
+				errors <- fmt.Sprintf("%s: %v", source.Name, err)
+				return
+			}
+			
+			results <- fmt.Sprintf("%s: %d items", source.Name, len(feed.Items))
+		}(src)
+	}
+	
+	wg.Wait()
+	close(results)
+	close(errors)
+	
+	// Process results
+	successCount = len(results)
+	failureCount = len(errors)
+	
+	// Build message
+	var message strings.Builder
+	message.WriteString(fmt.Sprintf("Tested %d sources: ", testCount))
+	message.WriteString(fmt.Sprintf("%d succeeded, %d failed\n", successCount, failureCount))
+	
+	// List successful sources
+	for result := range results {
+		message.WriteString(fmt.Sprintf("✓ %s\n", result))
+	}
+	
+	// List failed sources
+	for err := range errors {
+		message.WriteString(fmt.Sprintf("✗ %s\n", err))
+	}
+	
+	return TestResult{
+		Success: failureCount == 0,
+		Message: message.String(),
+	}
+}
+
+// TestDiscordConnection tests the Discord connection
+func TestDiscordConnection(dg *discordgo.Session) TestResult {
+	if dg == nil {
+		return TestResult{
+			Success: false,
+			Message: "Discord session not initialized",
+		}
+	}
+	
+	// Get bot user information
+	user, err := dg.User("@me")
+	if err != nil {
+		return TestResult{
+			Success: false,
+			Message: "Failed to get bot user information",
+			Error:   err,
+		}
+	}
+	
+	return TestResult{
+		Success: true,
+		Message: fmt.Sprintf("Connected as %s#%s (ID: %s)", user.Username, user.Discriminator, user.ID),
+	}
+}
+
+// TestDiscordPermissions tests if bot has required permissions
+func TestDiscordPermissions(dg *discordgo.Session) TestResult {
+	if dg == nil {
+		return TestResult{
+			Success: false,
+			Message: "Discord session not initialized",
+		}
+	}
+	
+	// Get guilds
+	guilds, err := dg.UserGuilds(100, "", "")
+	if err != nil {
+		return TestResult{
+			Success: false,
+			Message: "Failed to get guilds",
+			Error:   err,
+		}
+	}
+	
+	if len(guilds) == 0 {
+		return TestResult{
+			Success: false,
+			Message: "Bot is not in any guilds",
+		}
+	}
+	
+	// Check first guild
+	guild := guilds[0]
+	
+	// Check if we can send messages to a channel
+	channels, err := dg.GuildChannels(guild.ID)
+	if err != nil {
+		return TestResult{
+			Success: false,
+			Message: fmt.Sprintf("Failed to get channels for guild %s", guild.Name),
+			Error:   err,
+		}
+	}
+	
+	// Find a text channel
+	var textChannel *discordgo.Channel
+	for _, channel := range channels {
+		if channel.Type == discordgo.ChannelTypeGuildText {
+			textChannel = channel
+			break
+		}
+	}
+	
+	if textChannel == nil {
+		return TestResult{
+			Success: false,
+			Message: fmt.Sprintf("No text channels found in guild %s", guild.Name),
+		}
+	}
+	
+	return TestResult{
+		Success: true,
+		Message: fmt.Sprintf("Bot has access to guild '%s' with %d channels", guild.Name, len(channels)),
+	}
+}
