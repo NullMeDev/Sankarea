@@ -1,63 +1,69 @@
-package main
+package sankarea
 
 import (
     "fmt"
     "log"
+    "sync"
     "time"
 
     "github.com/bwmarrin/discordgo"
     "github.com/mmcdole/gofeed"
-    "github.com/robfig/cron/v3"
 )
 
-// Post top article summaries every 2 hours from curated sources
-func PostTopArticles(dg *discordgo.Session, channelID string, sources []Source) {
-    sourcesLock.Lock()
-    defer sourcesLock.Unlock()
+var (
+    articlesLock sync.Mutex
+    articlesSent = make(map[string]bool)
+)
+
+// fetchAndPostArticles fetches articles from active sources and posts to the Discord channel
+func fetchAndPostArticles(dg *discordgo.Session, channelID string, sources []Source, maxPosts int) {
+    articlesLock.Lock()
+    defer articlesLock.Unlock()
 
     if state.Paused {
         return
     }
 
     fp := gofeed.NewParser()
-    postedSources := 0
+    postedCount := 0
 
     for _, src := range sources {
         if !src.Active {
             continue
         }
-        // Filter for gov or main political biases for article posting
-        if src.Bias != "gov" && src.Bias != "left" && src.Bias != "right" && src.Bias != "center" {
-            continue
-        }
-
         feed, err := fp.ParseURL(src.URL)
         if err != nil {
-            log.Printf("Article fetch failed for %s: %v", src.Name, err)
-            continue
-        }
-        if len(feed.Items) == 0 {
+            log.Printf("Failed to fetch feed %s: %v", src.Name, err)
             continue
         }
 
-        topItem := feed.Items[0]
-        msg := fmt.Sprintf("**Top from [%s] (%s):**\n[%s](%s)", src.Name, src.Bias, topItem.Title, topItem.Link)
-        _, err = dg.ChannelMessageSend(channelID, msg)
-        if err != nil {
-            log.Printf("Failed to post article from %s: %v", src.Name, err)
-        } else {
-            postedSources++
+        for _, item := range feed.Items {
+            if postedCount >= maxPosts {
+                break
+            }
+            if articlesSent[item.GUID] {
+                continue
+            }
+
+            msg := fmt.Sprintf("**[%s]** *(bias: %s)*\n[%s](%s)", src.Name, src.Bias, item.Title, item.Link)
+            _, err := dg.ChannelMessageSend(channelID, msg)
+            if err != nil {
+                log.Printf("Failed to post article from %s: %v", src.Name, err)
+                continue
+            }
+
+            articlesSent[item.GUID] = true
+            postedCount++
         }
     }
-    log.Printf("Posted top articles from %d sources", postedSources)
+    log.Printf("Posted %d articles", postedCount)
+    state.FeedCount = postedCount
+    saveState(state)
 }
 
-// Schedule article posting every 2 hours
-func ScheduleArticlePosting(cronJob *cron.Cron, dg *discordgo.Session, channelID string, sources []Source) {
-    _, err := cronJob.AddFunc("@every 2h", func() {
-        PostTopArticles(dg, channelID, sources)
-    })
-    if err != nil {
-        LogAudit("CronError", fmt.Sprintf("Failed to schedule article posting: %v", err), 0xff0000)
-    }
+// clearArticlesSent resets the tracking of sent articles (useful on bot restart)
+func clearArticlesSent() {
+    articlesLock.Lock()
+    defer articlesLock.Unlock()
+    articlesSent = make(map[string]bool)
 }
