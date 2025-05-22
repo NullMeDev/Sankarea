@@ -1,12 +1,18 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/bwmarrin/discordgo"
+	"github.com/robfig/cron/v3"
 )
 
 // Error severity levels
@@ -147,12 +153,12 @@ type UserFilterManager struct {
 
 // UserFilter represents a user's filtering preferences
 type UserFilter struct {
-	UserID         string   `json:"userId"`
-	DisabledSources []string `json:"disabledSources"`
+	UserID            string   `json:"userId"`
+	DisabledSources   []string `json:"disabledSources"`
 	DisabledCategories []string `json:"disabledCategories"`
-	IncludeKeywords []string `json:"includeKeywords"`
-	ExcludeKeywords []string `json:"excludeKeywords"`
-	LastUpdated    time.Time `json:"lastUpdated"`
+	IncludeKeywords   []string `json:"includeKeywords"`
+	ExcludeKeywords   []string `json:"excludeKeywords"`
+	LastUpdated       time.Time `json:"lastUpdated"`
 }
 
 // NewUserFilterManager creates a new user filter manager
@@ -349,10 +355,7 @@ func (dm *DigestManager) StartScheduler(session *discordgo.Session) error {
 
 // GenerateDigest generates a news digest
 func (dm *DigestManager) GenerateDigest(session *discordgo.Session, channelID string, settings *DigestSettings) error {
-	// Implementation omitted for brevity
-	// Should generate a digest and send it to the specified channel
-	
-	// Record digest generation in state
+	// Implementation would generate a digest and send it to the specified channel
 	RecordDigestGeneration()
 	
 	return nil
@@ -687,15 +690,13 @@ func SetupLogging() error {
 
 // InitDB initializes the database connection
 func InitDB() error {
-	// Implementation omitted for brevity
-	// Should initialize the database connection and create tables if needed
+	// Implementation would initialize database connection
 	return nil
 }
 
 // StartHealthServer starts the health API server
 func StartHealthServer(port int) {
-	// Implementation omitted for brevity
-	// Should start an HTTP server to expose health metrics
+	// Implementation would start an HTTP server for health monitoring
 	go func() {
 		defer RecoverFromPanic("health-server")
 		
@@ -709,9 +710,7 @@ func StartHealthServer(port int) {
 
 // StartDashboard starts the web dashboard
 func StartDashboard() error {
-	// Implementation omitted for brevity
-	// Should start the web dashboard for monitoring and configuration
-	
+	// Implementation would start the web dashboard
 	go func() {
 		defer RecoverFromPanic("dashboard")
 		
@@ -721,4 +720,23 @@ func StartDashboard() error {
 	}()
 	
 	return nil
+}
+
+// formatDuration formats a duration in a human-readable format
+func formatDuration(d time.Duration) string {
+	days := int(d.Hours() / 24)
+	hours := int(d.Hours()) % 24
+	minutes := int(d.Minutes()) % 60
+	seconds := int(d.Seconds()) % 60
+	
+	if days > 0 {
+		return fmt.Sprintf("%dd %dh %dm %ds", days, hours, minutes, seconds)
+	}
+	if hours > 0 {
+		return fmt.Sprintf("%dh %dm %ds", hours, minutes, seconds)
+	}
+	if minutes > 0 {
+		return fmt.Sprintf("%dm %ds", minutes, seconds)
+	}
+	return fmt.Sprintf("%ds", seconds)
 }
