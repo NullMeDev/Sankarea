@@ -32,7 +32,7 @@ type SentimentAnalysis struct {
 
 // AnalyzeArticleSentiment performs sentiment analysis on an article
 func AnalyzeArticleSentiment(article *Article) (*SentimentAnalysis, error) {
-	if !cfg.EnableSummarization || cfg.OpenAIAPIKey == "" {
+	if cfg == nil || !cfg.EnableSummarization || cfg.OpenAIAPIKey == "" {
 		return nil, fmt.Errorf("OpenAI integration not configured")
 	}
 
@@ -74,6 +74,9 @@ Provide output in JSON format with these fields:
 				},
 			},
 			Temperature: 0.2, // Low temperature for more consistent results
+			ResponseFormat: &openai.ChatCompletionResponseFormat{
+				Type: openai.ChatCompletionResponseFormatTypeJSONObject,
+			},
 		},
 	)
 	if err != nil {
@@ -93,6 +96,7 @@ Provide output in JSON format with these fields:
 	jsonResponse = strings.TrimSuffix(jsonResponse, "```")
 	jsonResponse = strings.TrimSpace(jsonResponse)
 
+	// Parse the response JSON
 	var result struct {
 		Sentiment     string             `json:"sentiment"`
 		Score         float64            `json:"score"`
@@ -102,88 +106,85 @@ Provide output in JSON format with these fields:
 		IsOpinionated bool               `json:"is_opinionated"`
 	}
 
-	err = json.Unmarshal([]byte(jsonResponse), &result)
-	if err != nil {
-		return nil, fmt.Errorf("Failed to parse AI response: %v", err)
+	if err := json.Unmarshal([]byte(jsonResponse), &result); err != nil {
+		return nil, fmt.Errorf("Failed to parse AI analysis: %v", err)
 	}
 
-	analysis := &SentimentAnalysis{
+	return &SentimentAnalysis{
 		Sentiment:    result.Sentiment,
 		Score:        result.Score,
 		Topics:       result.Topics,
 		Keywords:     result.Keywords,
 		EntityCount:  result.EntityCount,
 		IsOpinionated: result.IsOpinionated,
-	}
-
-	return analysis, nil
+	}, nil
 }
 
-// GetArticleCategoryRecommendation determines the best category for an article
-func GetArticleCategoryRecommendation(sentiment *SentimentAnalysis) string {
-	if len(sentiment.Topics) == 0 {
-		return "General"
+// Helper function min returns the minimum of two integers
+func min(a, b int) int {
+	if a < b {
+		return a
 	}
-
-	// Map common topics to categories
-	topicCategories := map[string]string{
-		"politics":    "Politics",
-		"government":  "Politics",
-		"election":    "Politics",
-		"technology":  "Technology",
-		"tech":        "Technology",
-		"science":     "Science",
-		"research":    "Science",
-		"business":    "Business",
-		"economy":     "Business",
-		"finance":     "Business",
-		"sports":      "Sports",
-		"gaming":      "Entertainment",
-		"movie":       "Entertainment",
-		"film":        "Entertainment",
-		"entertain":   "Entertainment",
-		"health":      "Health",
-		"medical":     "Health",
-		"environment": "Environment",
-		"climate":     "Environment",
-		"culture":     "Culture",
-		"arts":        "Culture",
-		"education":   "Education",
-		"world":       "World News",
-		"war":         "World News",
-		"conflict":    "World News",
-	}
-
-	// Check topics against our mapping
-	for _, topic := range sentiment.Topics {
-		topicLower := strings.ToLower(topic)
-		for key, category := range topicCategories {
-			if strings.Contains(topicLower, key) {
-				return category
-			}
-		}
-	}
-
-	// Default category
-	return "General"
+	return b
 }
 
-// updateOpenAIUsageCost updates the usage cost in the state
-func updateOpenAIUsageCost(tokens int) {
-	// Approximate cost calculation: $0.002 per 1K tokens for gpt-3.5-turbo
-	cost := float64(tokens) * 0.002 / 1000.0
-
-	state, err := LoadState()
-	if err != nil {
-		Logger().Printf("Failed to load state for API cost tracking: %v", err)
-		return
+// SummarizeArticle generates a concise summary of an article
+func SummarizeArticle(article *Article, maxLength int) (string, error) {
+	if cfg == nil || !cfg.EnableSummarization || cfg.OpenAIAPIKey == "" {
+		return "", fmt.Errorf("OpenAI integration not configured")
 	}
 
-	state.LastSummaryCost = cost
-	state.DailyAPIUsage += cost
-	
-	err = SaveState(state)
-	if err != nil {
-		Logger().Printf("Failed to save state for API cost tracking: %v", err)
+	client := openai.NewClient(cfg.OpenAIAPIKey)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*30)
+	defer cancel()
+
+	// Prepare system prompt for article summarization
+	systemPrompt := fmt.Sprintf(`You are an AI that summarizes news articles in a neutral, factual manner.
+Create a concise summary that captures the key points of the article.
+Keep the summary under %d characters.
+Do not include your own opinions or analysis.`, maxLength)
+
+	// Extract a shorter version of the content for analysis
+	contentToAnalyze := article.Title
+	if len(article.Content) > 0 {
+		// Take the first 2500 characters or so for summarization
+		contentLen := min(len(article.Content), 2500)
+		contentToAnalyze += "\n\n" + article.Content[:contentLen]
 	}
+
+	// Create completion request
+	resp, err := client.CreateChatCompletion(
+		ctx,
+		openai.ChatCompletionRequest{
+			Model: "gpt-3.5-turbo",
+			Messages: []openai.ChatCompletionMessage{
+				{
+					Role:    "system",
+					Content: systemPrompt,
+				},
+				{
+					Role:    "user",
+					Content: fmt.Sprintf("Summarize this article from %s:\n\n%s", article.Source, contentToAnalyze),
+				},
+			},
+			Temperature: 0.3, // Low temperature for more consistent results
+		},
+	)
+	if err != nil {
+		return "", fmt.Errorf("OpenAI API error: %v", err)
+	}
+
+	// Update API usage cost
+	updateOpenAIUsageCost(resp.Usage.TotalTokens)
+
+	// Extract summary
+	summary := resp.Choices[0].Message.Content
+	summary = strings.TrimSpace(summary)
+
+	// Ensure summary doesn't exceed max length
+	if len(summary) > maxLength {
+		summary = summary[:maxLength] + "..."
+	}
+
+	return summary, nil
 }
