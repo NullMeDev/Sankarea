@@ -2,7 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"io/ioutil"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v2"
@@ -41,39 +44,45 @@ type Source struct {
 // Config holds application configuration
 type Config struct {
 	// Bot Configuration
-	BotToken             string   `json:"bot_token"`
-	AppID                string   `json:"app_id"`
-	GuildID              string   `json:"guild_id"`
-	Version              string   `json:"version"`
-	MaxPostsPerSource    int      `json:"maxPostsPerSource"`
-	OwnerIDs             []string `json:"ownerIDs"` // Discord User IDs who have owner permissions
-	AdminRoleIDs         []string `json:"adminRoleIDs"` // Discord Role IDs that have admin permissions
+	BotToken             string          `json:"bot_token"`
+	AppID                string          `json:"app_id"`
+	GuildID              string          `json:"guild_id"`
+	Version              string          `json:"version"`
+	MaxPostsPerSource    int             `json:"maxPostsPerSource"`
+	OwnerIDs             []string        `json:"ownerIDs"` // Discord User IDs who have owner permissions
+	AdminRoleIDs         []string        `json:"adminRoleIDs"` // Discord Role IDs that have admin permissions
 	
 	// Channels Configuration
-	NewsChannelID        string   `json:"newsChannelId"`
-	DigestChannelID      string   `json:"digestChannelId"` // Can be same as NewsChannelID
-	AuditLogChannelID    string   `json:"auditLogChannelId"` 
-	ErrorChannelID       string   `json:"errorChannelId"`
+	NewsChannelID        string          `json:"newsChannelId"`
+	DigestChannelID      string          `json:"digestChannelId"` // Can be same as NewsChannelID
+	AuditLogChannelID    string          `json:"auditLogChannelId"` 
+	ErrorChannelID       string          `json:"errorChannelId"`
+	Channels             []ChannelConfig `json:"channels"` // Additional channel configurations
 	
 	// Schedule Configuration
-	NewsIntervalMinutes  int      `json:"newsIntervalMinutes"` // Default: 120 (2 hours)
-	DigestCronSchedule   string   `json:"digestCronSchedule"`  // Default: "0 8 * * *" (8 AM daily)
-	News15MinCron        string   `json:"news15MinCron"`      // Cron schedule for news updates
+	NewsIntervalMinutes  int             `json:"newsIntervalMinutes"` // Default: 120 (2 hours)
+	DigestCronSchedule   string          `json:"digestCronSchedule"`  // Default: "0 8 * * *" (8 AM daily)
+	News15MinCron        string          `json:"news15MinCron"`      // Cron schedule for news updates
 	
 	// API Keys and Integration
-	OpenAIAPIKey         string   `json:"openai_api_key"`
-	GoogleFactCheckAPIKey string  `json:"google_factcheck_api_key"`
-	ClaimBustersAPIKey   string   `json:"claimbusters_api_key"`
+	OpenAIAPIKey         string          `json:"openai_api_key"`
+	GoogleFactCheckAPIKey string         `json:"google_factcheck_api_key"`
+	ClaimBustersAPIKey   string          `json:"claimbusters_api_key"`
+	YouTubeAPIKey        string          `json:"youtube_api_key"` 
+	TwitterBearerToken   string          `json:"twitter_bearer_token"`
 	
 	// Feature Toggles
-	EnableFactCheck      bool     `json:"enableFactCheck"`
-	EnableSummarization  bool     `json:"enableSummarization"`
-	EnableContentFiltering bool   `json:"enableContentFiltering"`
-	EnableDatabase       bool     `json:"enableDatabase"`
+	EnableFactCheck      bool            `json:"enableFactCheck"`
+	EnableSummarization  bool            `json:"enableSummarization"`
+	EnableContentFiltering bool          `json:"enableContentFiltering"`
+	EnableDatabase       bool            `json:"enableDatabase"`
 	
 	// Advanced Configuration
-	UserAgentString      string   `json:"userAgentString"`
-	HealthAPIPort        int      `json:"healthAPIPort"`
+	UserAgentString      string          `json:"userAgentString"`
+	HealthAPIPort        int             `json:"healthAPIPort"`
+	
+	// Report Configuration
+	Reports              ReportConfig    `json:"reports"`
 }
 
 // LoadConfig loads the application configuration from file and environment variables
@@ -86,10 +95,15 @@ func LoadConfig() (*Config, error) {
 		DigestCronSchedule:  "0 8 * * *", // 8 AM daily
 		News15MinCron:       "*/15 * * * *", // Every 15 minutes
 		UserAgentString:     "Sankarea News Bot v" + VERSION,
+		Reports: ReportConfig{
+			Enabled:     true,
+			WeeklyCron:  "0 9 * * 1", // Monday at 9 AM
+			MonthlyCron: "0 9 1 * *", // 1st day of month at 9 AM
+		},
 	}
 
 	// Load from file if it exists
-	data, err := os.ReadFile(configFilePath)
+	data, err := ioutil.ReadFile(configFilePath)
 	if err == nil {
 		// File exists, try to parse it
 		if err := json.Unmarshal(data, cfg); err != nil {
@@ -119,13 +133,24 @@ func LoadConfig() (*Config, error) {
 	if claimBusterKey := os.Getenv("CLAIMBUSTER_API_KEY"); claimBusterKey != "" {
 		cfg.ClaimBustersAPIKey = claimBusterKey
 	}
+	if youtubeKey := os.Getenv("YOUTUBE_API_KEY"); youtubeKey != "" {
+		cfg.YouTubeAPIKey = youtubeKey
+	}
+	if twitterToken := os.Getenv("TWITTER_BEARER_TOKEN"); twitterToken != "" {
+		cfg.TwitterBearerToken = twitterToken
+	}
+
+	// Parse webhook URLs
+	if webhooks := os.Getenv("DISCORD_WEBHOOKS"); webhooks != "" {
+		// This would be used for additional notifications
+	}
 
 	return cfg, nil
 }
 
 // LoadSources loads all news sources from the sources file
 func LoadSources() ([]Source, error) {
-	data, err := os.ReadFile(sourcesFilePath)
+	data, err := ioutil.ReadFile(sourcesFilePath)
 	if err != nil {
 		return nil, err
 	}
@@ -147,18 +172,44 @@ func LoadSources() ([]Source, error) {
 
 // SaveSources saves the sources back to the sources file
 func SaveSources(sources []Source) error {
+	// If we received a subset of sources, merge with existing
+	if len(sources) < 10 { // Assuming we have more than 10 total sources
+		existingSources, err := LoadSources()
+		if err == nil {
+			// This is very simplistic and would need to be improved
+			// to properly handle merging with existing sources
+			sourceMap := make(map[string]Source)
+			
+			// Add existing sources to map
+			for _, src := range existingSources {
+				sourceMap[src.Name] = src
+			}
+			
+			// Update with new sources
+			for _, src := range sources {
+				sourceMap[src.Name] = src
+			}
+			
+			// Convert back to slice
+			sources = []Source{}
+			for _, src := range sourceMap {
+				sources = append(sources, src)
+			}
+		}
+	}
+
 	data, err := yaml.Marshal(sources)
 	if err != nil {
 		return err
 	}
 
-	return os.WriteFile(sourcesFilePath, data, 0644)
+	return ioutil.WriteFile(sourcesFilePath, data, 0644)
 }
 
 // LoadEnv loads environment variables from .env file if it exists
 func LoadEnv() {
 	// No need for external libraries, just check if file exists
-	data, err := os.ReadFile(".env")
+	data, err := ioutil.ReadFile(".env")
 	if err != nil {
 		return
 	}
@@ -215,7 +266,7 @@ func FileMustExist(path string) {
 			if err != nil {
 				log.Fatalf("Failed to create default config: %v", err)
 			}
-			if err := os.WriteFile(path, data, 0644); err != nil {
+			if err := ioutil.WriteFile(path, data, 0644); err != nil {
 				log.Fatalf("Failed to write default config: %v", err)
 			}
 		case sourcesFilePath:
@@ -233,12 +284,12 @@ func FileMustExist(path string) {
 			if err != nil {
 				log.Fatalf("Failed to create default sources: %v", err)
 			}
-			if err := os.WriteFile(path, data, 0644); err != nil {
+			if err := ioutil.WriteFile(path, data, 0644); err != nil {
 				log.Fatalf("Failed to write default sources: %v", err)
 			}
 		default:
 			// Create empty file
-			if err := os.WriteFile(path, []byte{}, 0644); err != nil {
+			if err := ioutil.WriteFile(path, []byte{}, 0644); err != nil {
 				log.Fatalf("Failed to create file %s: %v", path, err)
 			}
 		}
