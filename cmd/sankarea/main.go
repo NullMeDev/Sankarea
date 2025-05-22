@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -26,6 +28,43 @@ var (
 	discordGuildID    string
 	startTime         time.Time
 )
+
+func loadEnv() {
+	if _, err := os.Stat(".env"); err == nil {
+		file, err := os.Open(".env")
+		if err == nil {
+			defer file.Close()
+
+			scanner := bufio.NewScanner(file)
+			for scanner.Scan() {
+				line := scanner.Text()
+				if strings.HasPrefix(line, "#") || len(strings.TrimSpace(line)) == 0 {
+					continue
+				}
+
+				parts := strings.SplitN(line, "=", 2)
+				if len(parts) != 2 {
+					continue
+				}
+
+				key := strings.TrimSpace(parts[0])
+				value := strings.Trim(strings.TrimSpace(parts[1]), "\"'")
+
+				if os.Getenv(key) == "" {
+					os.Setenv(key, value)
+				}
+			}
+		}
+	}
+}
+
+func getEnvOrDefault(key, defaultValue string) string {
+	v := os.Getenv(key)
+	if v == "" {
+		return defaultValue
+	}
+	return v
+}
 
 func main() {
 	defer logPanic()
@@ -56,10 +95,22 @@ func main() {
 		})
 	}
 
-	discordBotToken := getEnvOrFail("DISCORD_BOT_TOKEN")
-	discordAppID := getEnvOrFail("DISCORD_APPLICATION_ID")
-	discordGuildID = getEnvOrFail("DISCORD_GUILD_ID")
-	discordChannelID = getEnvOrFail("DISCORD_CHANNEL_ID")
+	discordBotToken := getEnvOrDefault("DISCORD_BOT_TOKEN", "")
+	if discordBotToken == "" {
+		log.Fatal("DISCORD_BOT_TOKEN environment variable must be set")
+	}
+	discordAppID := getEnvOrDefault("DISCORD_APPLICATION_ID", "")
+	if discordAppID == "" {
+		log.Fatal("DISCORD_APPLICATION_ID environment variable must be set")
+	}
+	discordGuildID = getEnvOrDefault("DISCORD_GUILD_ID", "")
+	if discordGuildID == "" {
+		log.Fatal("DISCORD_GUILD_ID environment variable must be set")
+	}
+	discordChannelID = getEnvOrDefault("DISCORD_CHANNEL_ID", "")
+	if discordChannelID == "" {
+		log.Fatal("DISCORD_CHANNEL_ID environment variable must be set")
+	}
 	discordOwnerID = getEnvOrDefault("DISCORD_OWNER_ID", "")
 
 	var err error
