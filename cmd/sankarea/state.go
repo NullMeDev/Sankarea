@@ -86,7 +86,7 @@ func LoadState() (*State, error) {
 	}
 	
 	// Update our global state with the loaded values
-	state = &loadedState
+	*state = loadedState
 	
 	// Set system status based on paused state
 	if state.Paused {
@@ -106,8 +106,8 @@ func SaveState(s *State) error {
 	// Create a copy of the state to avoid data race
 	stateCopy := *s 
 	
-	// Update the state copy
-	state = &stateCopy
+	// Update the global state with the copy
+	*state = stateCopy
 
 	// Calculate uptime before saving
 	state.UptimeSeconds = time.Since(state.StartupTime).Milliseconds() / 1000
