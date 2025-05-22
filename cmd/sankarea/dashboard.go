@@ -108,6 +108,24 @@ func handleDashboardLogs(w http.ResponseWriter, r *http.Request) {
 	renderTemplate(w, "logs.html", getDashboardData())
 }
 
+// handleHealthCheck provides a simple health check endpoint
+func handleHealthCheck(w http.ResponseWriter, r *http.Request) {
+	state, err := LoadState()
+	if err != nil {
+		respondWithJSON(w, http.StatusOK, map[string]string{
+			"status": "degraded",
+			"error":  "Failed to load state",
+		})
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, map[string]string{
+		"status":  getStatusString(state),
+		"version": cfg.Version,
+		"uptime":  time.Since(state.StartupTime).String(),
+	})
+}
+
 // renderTemplate renders a dashboard template with data
 func renderTemplate(w http.ResponseWriter, templateName string, data interface{}) {
 	// Check if template exists
@@ -481,11 +499,14 @@ func apiGetLogs(w http.ResponseWriter, r *http.Request) {
 	// Split into lines
 	lines := strings.Split(string(content), "\n")
 
-	// Get last N lines
-	if limit > len(lines) {
-		limit = len(lines)
+	// Get last N lines (with safety check for empty slices)
+	lastLines := []string{}
+	if len(lines) > 0 {
+		if limit > len(lines) {
+			limit = len(lines)
+		}
+		lastLines = lines[len(lines)-limit:]
 	}
-	lastLines := lines[len(lines)-limit:]
 
 	respondWithJSON(w, http.StatusOK, map[string]interface{}{
 		"logs":      lastLines,
@@ -516,10 +537,18 @@ func handleWebsocket(w http.ResponseWriter, r *http.Request) {
 
 	// Send initial data
 	data := getDashboardData()
-	conn.WriteJSON(map[string]interface{}{
+	initData, err := json.Marshal(map[string]interface{}{
 		"type": "init",
 		"data": data,
 	})
+	if err != nil {
+		Logger().Printf("Error marshaling init data: %v", err)
+		return
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, initData); err != nil {
+		Logger().Printf("Error sending init data: %v", err)
+		return
+	}
 
 	// Handle incoming messages
 	for {
@@ -541,9 +570,15 @@ func notifyWebSocketClients(eventType string, data interface{}) {
 		"data": data,
 		"time": time.Now().Format(time.RFC3339),
 	}
+	
+	messageJSON, err := json.Marshal(message)
+	if err != nil {
+		Logger().Printf("Error marshaling websocket message: %v", err)
+		return
+	}
 
 	for client := range wsClients {
-		err := client.WriteJSON(message)
+		err := client.WriteMessage(websocket.TextMessage, messageJSON)
 		if err != nil {
 			Logger().Printf("Error sending to websocket client: %v", err)
 			client.Close()
@@ -746,18 +781,18 @@ func CreateDefaultDashboardTemplates() error {
 document.addEventListener('DOMContentLoaded', function() {
     // Calculate active sources
     let activeCount = 0;
-    const categories = new Set();
+    const categoriesSet = new Set();
     {{range .Sources}}
         {{if not .Paused}}
             activeCount++;
         {{end}}
         {{if .Category}}
-            categories.add("{{.Category}}");
+            categoriesSet.add({{.Category | printf "%q"}});
         {{end}}
     {{end}}
     
     document.getElementById('active-sources').textContent = activeCount;
-    document.getElementById('categories').textContent = Array.from(categories).join(", ") || "None";
+    document.getElementById('categories').textContent = Array.from(categoriesSet).join(", ") || "None";
     
     // Initialize chart
     const ctx = document.getElementById('sourcesChart').getContext('2d');
@@ -769,6 +804,14 @@ document.addEventListener('DOMContentLoaded', function() {
                 data: [activeCount, {{len .Sources}} - activeCount],
                 backgroundColor: ['#28a745', '#ffc107']
             }]
+        },
+        options: {
+            responsive: true,
+            plugins: {
+                legend: {
+                    position: 'bottom',
+                }
+            }
         }
     });
     
@@ -881,19 +924,23 @@ function connectWebSocket() {
     };
     
     socket.onmessage = function(event) {
-        const data = JSON.parse(event.data);
-        console.log('WebSocket message received:', data);
-        
-        // Handle different event types
-        switch (data.type) {
-            case 'source_added':
-            case 'source_updated':
-            case 'source_deleted':
-            case 'config_updated':
-            case 'state_updated':
-                // Refresh the page to show updated data
-                location.reload();
-                break;
+        try {
+            const data = JSON.parse(event.data);
+            console.log('WebSocket message received:', data);
+            
+            // Handle different event types
+            switch (data.type) {
+                case 'source_added':
+                case 'source_updated':
+                case 'source_deleted':
+                case 'config_updated':
+                case 'state_updated':
+                    // Refresh the page to show updated data
+                    location.reload();
+                    break;
+            }
+        } catch (error) {
+            console.error('Error parsing WebSocket message:', error);
         }
     };
     
