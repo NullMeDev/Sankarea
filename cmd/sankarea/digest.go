@@ -105,26 +105,9 @@ func GenerateDailyDigest(s *discordgo.Session, channelID string) error {
 		time.Sleep(500 * time.Millisecond)
 	}
 
-	// Send top positive and negative articles
-	if config.TopArticlesCount > 0 {
-		// Get top positive articles
-		positiveArticles, err := getTopArticlesBySentiment(config.TopArticlesCount, true)
-		if err == nil && len(positiveArticles) > 0 {
-			embed := createTopArticlesEmbed("Most Positive Stories", positiveArticles, 0x43B581)
-			s.ChannelMessageSendEmbed(channelID, embed)
-		}
-
-		// Get top negative articles
-		negativeArticles, err := getTopArticlesBySentiment(config.TopArticlesCount, false)
-		if err == nil && len(negativeArticles) > 0 {
-			embed := createTopArticlesEmbed("Most Negative Stories", negativeArticles, 0xF04747)
-			s.ChannelMessageSendEmbed(channelID, embed)
-		}
-	}
-
-	// Include stats if enabled
+	// Send stats if requested
 	if config.IncludeStats {
-		statsEmbed := createStatsEmbed(len(articles), len(sources))
+		statsEmbed := createStatsEmbed(sources)
 		_, err = s.ChannelMessageSendEmbed(channelID, statsEmbed)
 		if err != nil {
 			Logger().Printf("Failed to send stats: %v", err)
@@ -132,363 +115,196 @@ func GenerateDailyDigest(s *discordgo.Session, channelID string) error {
 	}
 
 	// Update state
-	state.LastDigest = time.Now()
+	state.DigestCount++
+	state.DigestNextTime = calculateNextDigestTime(cfg.DigestCronSchedule)
 	SaveState(state)
 
 	return nil
 }
 
-// ArticleDigest represents an article for digest
+// ArticleDigest represents an article in a digest
 type ArticleDigest struct {
 	Title     string
 	URL       string
 	Source    string
 	Published time.Time
-	Sentiment float64
-	Topics    []string
+	Category  string
+	Bias      string
+	Summary   string
 }
 
-// TrendingTopic represents a trending topic
-type TrendingTopic struct {
-	Topic    string
-	Count    int
-	Articles []string  // List of article titles
-}
-
-// getArticlesForDigest returns articles from the last N hours
+// getArticlesForDigest gets articles for a digest
+// This would normally pull from a database, but for this example we'll simulate
 func getArticlesForDigest(hours int) ([]ArticleDigest, error) {
-	// If we have a database connection, use it
-	if db != nil {
-		query := `SELECT title, url, source_name, published_at, sentiment, category 
-				FROM articles 
-				WHERE published_at > datetime('now', '-' || ? || ' hours')
-				ORDER BY published_at DESC`
-		
-		rows, err := db.Query(query, hours)
-		if err != nil {
-			return nil, err
-		}
-		defer rows.Close()
-		
-		var articles []ArticleDigest
-		for rows.Next() {
-			var article ArticleDigest
-			var category string
-			err := rows.Scan(&article.Title, &article.URL, &article.Source, &article.Published, 
-				&article.Sentiment, &category)
-			if err != nil {
-				return nil, err
-			}
-			articles = append(articles, article)
-		}
-		
-		return articles, nil
-	}
-	
-	// Fallback: Use in-memory sources
-	// (This is less ideal but works without database)
-	return []ArticleDigest{}, nil
+	// In a real implementation, this would fetch from a database
+	// For now, return sample data
+	return []ArticleDigest{
+		{
+			Title:     "Global Economy Shows Signs of Recovery",
+			URL:       "https://example.com/economy-recovery",
+			Source:    "Reuters",
+			Published: time.Now().Add(-3 * time.Hour),
+			Category:  "Business",
+			Bias:      "Center",
+		},
+		{
+			Title:     "New Climate Agreement Reached",
+			URL:       "https://example.com/climate-agreement",
+			Source:    "BBC",
+			Published: time.Now().Add(-5 * time.Hour),
+			Category:  "Environment",
+			Bias:      "Center-Left",
+		},
+		{
+			Title:     "Tech Companies Face New Regulations",
+			URL:       "https://example.com/tech-regulations",
+			Source:    "CNN",
+			Published: time.Now().Add(-8 * time.Hour),
+			Category:  "Technology",
+			Bias:      "Left-Center",
+		},
+		{
+			Title:     "Sports Team Wins Championship",
+			URL:       "https://example.com/sports-championship",
+			Source:    "Fox News",
+			Published: time.Now().Add(-12 * time.Hour),
+			Category:  "Sports",
+			Bias:      "Right",
+		},
+	}, nil
 }
 
-// analyzeTrendingTopics analyzes trending topics from articles
-func analyzeTrendingTopics(articles []ArticleDigest) []TrendingTopic {
-	// Count topic occurrences
-	topicCounts := make(map[string]int)
-	topicArticles := make(map[string][]string)
-	
-	for _, article := range articles {
-		for _, topic := range article.Topics {
-			topicCounts[topic]++
-			
-			// Add article title to this topic (avoid duplicates)
-			isDuplicate := false
-			for _, title := range topicArticles[topic] {
-				if title == article.Title {
-					isDuplicate = true
-					break
-				}
-			}
-			if !isDuplicate {
-				topicArticles[topic] = append(topicArticles[topic], article.Title)
-			}
-		}
+// analyzeTrendingTopics analyzes articles to find trending topics
+func analyzeTrendingTopics(articles []ArticleDigest) []string {
+	// In a real implementation, this would do NLP analysis
+	// For now, return sample data
+	return []string{
+		"Climate Change",
+		"Economic Recovery",
+		"Tech Regulation",
 	}
-	
-	// Create trending topics
-	var trending []TrendingTopic
-	for topic, count := range topicCounts {
-		if count >= 2 { // At least 2 mentions to be trending
-			trending = append(trending, TrendingTopic{
-				Topic:    topic,
-				Count:    count,
-				Articles: topicArticles[topic],
-			})
-		}
-	}
-	
-	// Sort by count (highest first)
-	sort.Slice(trending, func(i, j int) bool {
-		return trending[i].Count > trending[j].Count
-	})
-	
-	// Take top 10
-	if len(trending) > 10 {
-		trending = trending[:10]
-	}
-	
-	return trending
 }
 
 // getSortedCategories returns sorted category names
 func getSortedCategories(categorizedArticles map[string][]ArticleDigest) []string {
-	categories := make([]string, 0, len(categorizedArticles))
-	for category := range categorizedArticles {
-		categories = append(categories, category)
+	var categories []string
+	for cat := range categorizedArticles {
+		categories = append(categories, cat)
 	}
-	
-	// Sort categories alphabetically, but keep "General" last
-	sort.Slice(categories, func(i, j int) bool {
-		if categories[i] == "General" {
-			return false
-		}
-		if categories[j] == "General" {
-			return true
-		}
-		return categories[i] < categories[j]
-	})
-	
+	sort.Strings(categories)
 	return categories
 }
 
-// getTopArticlesBySentiment returns top positive or negative articles
-func getTopArticlesBySentiment(count int, positive bool) ([]ArticleDigest, error) {
-	var order string
-	if positive {
-		order = "DESC" // Highest sentiment first
-	} else {
-		order = "ASC" // Lowest sentiment first
-	}
-	
-	query := fmt.Sprintf(`SELECT title, url, source_name, published_at, sentiment, category 
-			FROM articles 
-			WHERE published_at > datetime('now', '-24 hours')
-			ORDER BY sentiment %s
-			LIMIT ?`, order)
-	
-	rows, err := db.Query(query, count)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	
-	var articles []ArticleDigest
-	for rows.Next() {
-		var article ArticleDigest
-		var category string
-		err := rows.Scan(&article.Title, &article.URL, &article.Source, &article.Published, 
-			&article.Sentiment, &category)
-		if err != nil {
-			return nil, err
-		}
-		articles = append(articles, article)
-	}
-	
-	return articles, nil
-}
-
 // createTrendingEmbed creates an embed for trending topics
-func createTrendingEmbed(topics []TrendingTopic) *discordgo.MessageEmbed {
-	embed := &discordgo.MessageEmbed{
-		Title:       "📈 Trending Topics",
-		Description: "Topics trending in today's news",
-		Color:       0x9B59B6, // Purple
-		Fields:      []*discordgo.MessageEmbedField{},
-		Timestamp:   time.Now().Format(time.RFC3339),
-	}
-	
-	if len(topics) == 0 {
-		embed.Description = "No trending topics detected today."
-		return embed
-	}
-	
-	// Add trending topics as fields
+func createTrendingEmbed(topics []string) *discordgo.MessageEmbed {
+	description := "Current trending topics in the news:"
 	for _, topic := range topics {
-		// Format article list (limited to 3)
-		articleList := topic.Articles
-		if len(articleList) > 3 {
-			articleList = articleList[:3]
-		}
-		
-		var articleText strings.Builder
-		for i, article := range articleList {
-			articleText.WriteString(fmt.Sprintf("• %s\n", truncateString(article, 60)))
-			if i >= 2 && len(topic.Articles) > 3 {
-				articleText.WriteString(fmt.Sprintf("• +%d more...\n", len(topic.Articles)-3))
-				break
-			}
-		}
-		
-		embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
-			Name:   fmt.Sprintf("%s (%d articles)", topic.Topic, topic.Count),
-			Value:  articleText.String(),
-			Inline: false,
-		})
+		description += fmt.Sprintf("\n• **%s**", topic)
 	}
-	
-	return embed
+
+	return &discordgo.MessageEmbed{
+		Title:       "🔥 Trending Topics",
+		Description: description,
+		Color:       0xFF9900, // Orange
+	}
 }
 
 // createCategoryEmbed creates an embed for a category
 func createCategoryEmbed(category string, articles []ArticleDigest) *discordgo.MessageEmbed {
-	// Determine color based on category
-	color := 0x4B9CD3 // Default blue
-	
-	// Set color by category
-	categoryColors := map[string]int{
-		"Politics":      0x9C27B0,
-		"Technology":    0x03A9F4,
-		"Business":      0x4CAF50,
-		"Entertainment": 0xFF9800,
-		"Sports":        0xF44336,
-		"Science":       0x3F51B5,
-		"Health":        0x2196F3,
+	// Set color based on category
+	color := 0x0099FF // Default blue
+	switch strings.ToLower(category) {
+	case "politics":
+		color = 0x880088 // Purple
+	case "business", "economy":
+		color = 0x008800 // Green
+	case "technology":
+		color = 0x0000FF // Blue
+	case "health":
+		color = 0xFF0000 // Red
+	case "science":
+		color = 0x00FFFF // Cyan
+	case "entertainment":
+		color = 0xFF00FF // Pink
+	case "sports":
+		color = 0xFF8800 // Orange
 	}
-	
-	if c, ok := categoryColors[category]; ok {
-		color = c
-	}
-	
-	embed := &discordgo.MessageEmbed{
-		Title:       fmt.Sprintf("📋 %s", category),
-		Description: fmt.Sprintf("Latest news in %s", category),
-		Color:       color,
-		Fields:      []*discordgo.MessageEmbedField{},
-		Timestamp:   time.Now().Format(time.RFC3339),
-	}
-	
-	// Add articles
+
+	// Build description
+	description := ""
 	for _, article := range articles {
-		// Format publish date
-		publishedStr := "Unknown date"
-		if !article.Published.IsZero() {
-			publishedStr = fmt.Sprintf("<t:%d:R>", article.Published.Unix())
-		}
-		
-		// Create field
-		embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
-			Name:   fmt.Sprintf("%s (%s)", article.Title, article.Source),
-			Value:  fmt.Sprintf("[Read Article](%s) • Published %s", article.URL, publishedStr),
-			Inline: false,
-		})
+		description += fmt.Sprintf("• [%s](%s) - %s (%s)\n", 
+			article.Title, 
+			article.URL, 
+			article.Source,
+			article.Published.Format("Jan 2, 15:04"))
 	}
-	
-	return embed
-}
 
-// createTopArticlesEmbed creates an embed for top articles by sentiment
-func createTopArticlesEmbed(title string, articles []ArticleDigest, color int) *discordgo.MessageEmbed {
-	embed := &discordgo.MessageEmbed{
-		Title:       title,
-		Description: fmt.Sprintf("Notable stories in the last 24 hours"),
+	return &discordgo.MessageEmbed{
+		Title:       fmt.Sprintf("📰 %s News", category),
+		Description: description,
 		Color:       color,
-		Fields:      []*discordgo.MessageEmbedField{},
-		Timestamp:   time.Now().Format(time.RFC3339),
 	}
-	
-	// Add articles
-	for _, article := range articles {
-		// Calculate sentiment emoji based on score
-		sentimentEmoji := "😐" // Neutral
-		if article.Sentiment > 0.6 {
-			sentimentEmoji = "😀" // Very positive
-		} else if article.Sentiment > 0.2 {
-			sentimentEmoji = "🙂" // Positive
-		} else if article.Sentiment < -0.6 {
-			sentimentEmoji = "😟" // Very negative
-		} else if article.Sentiment < -0.2 {
-			sentimentEmoji = "🙁" // Negative
-		}
-		
-		// Format publish date
-		publishedStr := "Unknown date"
-		if !article.Published.IsZero() {
-			publishedStr = fmt.Sprintf("<t:%d:R>", article.Published.Unix())
-		}
-		
-		// Create field
-		embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
-			Name:   fmt.Sprintf("%s %s (%s)", sentimentEmoji, article.Title, article.Source),
-			Value:  fmt.Sprintf("[Read Article](%s) • Published %s", article.URL, publishedStr),
-			Inline: false,
-		})
-	}
-	
-	return embed
 }
 
-// createStatsEmbed creates an embed with digest statistics
-func createStatsEmbed(articleCount int, sourceCount int) *discordgo.MessageEmbed {
-	embed := &discordgo.MessageEmbed{
-		Title:       "📊 Digest Statistics",
-		Color:       0x607D8B, // Blue grey
-		Fields:      []*discordgo.MessageEmbedField{},
-		Footer: &discordgo.MessageEmbedFooter{
-			Text: "Sankarea News Bot • Daily Digest",
-		},
-		Timestamp:   time.Now().Format(time.RFC3339),
+// createStatsEmbed creates an embed with stats
+func createStatsEmbed(sources []Source) *discordgo.MessageEmbed {
+	// Count active sources by bias
+	biasCounts := make(map[string]int)
+	totalSources := 0
+	activeSources := 0
+
+	for _, source := range sources {
+		totalSources++
+		if source.Active && !source.Paused {
+			activeSources++
+			bias := source.Bias
+			if bias == "" {
+				bias = "Unknown"
+			}
+			biasCounts[bias]++
+		}
 	}
+
+	// Build description
+	description := fmt.Sprintf("**Active Sources**: %d/%d\n\n**Coverage by Bias**:\n", 
+		activeSources, totalSources)
 	
-	// Add stats fields
-	embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
-		Name:   "Articles Processed",
-		Value:  fmt.Sprintf("%d", articleCount),
-		Inline: true,
-	})
-	
-	embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
-		Name:   "Active Sources",
-		Value:  fmt.Sprintf("%d", sourceCount),
-		Inline: true,
-	})
-	
-	embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
-		Name:   "Next Digest",
-		Value:  fmt.Sprintf("<t:%d:R>", GetNextDigestTime().Unix()),
-		Inline: true,
-	})
-	
-	return embed
+	// Add bias distribution
+	biases := []string{"Left", "Left-Center", "Center", "Right-Center", "Right"}
+	for _, bias := range biases {
+		count := biasCounts[bias]
+		bar := strings.Repeat("█", count)
+		if bar == "" {
+			bar = "▫️"
+		}
+		description += fmt.Sprintf("%s: %s (%d)\n", bias, bar, count)
+	}
+
+	// Add unknown if any
+	if count := biasCounts["Unknown"]; count > 0 {
+		description += fmt.Sprintf("Unknown: %s (%d)\n", 
+			strings.Repeat("█", count), count)
+	}
+
+	return &discordgo.MessageEmbed{
+		Title:       "📊 News Coverage Stats",
+		Description: description,
+		Color:       0x888888, // Gray
+	}
 }
 
-// GetNextDigestTime calculates the next digest time based on the cron schedule
-func GetNextDigestTime() time.Time {
-	// Parse the cron schedule
-	cronSchedule := cfg.DigestCronSchedule
-	if cronSchedule == "" {
-		cronSchedule = "0 8 * * *" // Default: 8 AM daily
-	}
-	
-	// Parse the cron expression (simplified for this example)
-	// In a real implementation, use a proper cron parser
-	fields := strings.Fields(cronSchedule)
-	if len(fields) != 5 {
-		return time.Now().Add(24 * time.Hour) // Default: tomorrow
-	}
-	
-	// Very simple parsing assuming "0 8 * * *" format (8 AM daily)
-	hour := 8
-	if h, err := strconv.Atoi(fields[1]); err == nil {
-		hour = h
-	}
-	
-	// Calculate next occurrence
+// calculateNextDigestTime calculates when the next digest should run
+func calculateNextDigestTime(cronSchedule string) time.Time {
+	// This would normally use proper cron parsing
+	// For simplicity, default to next day at 8 AM
 	now := time.Now()
-	next := time.Date(now.Year(), now.Month(), now.Day(), hour, 0, 0, 0, now.Location())
-	
-	// If today's occurrence has passed, move to tomorrow
-	if next.Before(now) {
-		next = next.Add(24 * time.Hour)
-	}
-	
-	return next
+	tomorrow := now.AddDate(0, 0, 1)
+	return time.Date(
+		tomorrow.Year(),
+		tomorrow.Month(),
+		tomorrow.Day(),
+		8, 0, 0, 0,
+		tomorrow.Location(),
+	)
 }
