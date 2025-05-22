@@ -1,14 +1,39 @@
-# Left-Leaning / Center-Left
-- name: "NPR"
-  url: "https://www.npr.org/rss/rss.php?id=1001"
-  bias: "left"
+- name: "CNN"
+  url: "http://rss.cnn.com/rss/cnn_topstories.rss"
+  category: "Mainstream"
+  bias: "Left-Center"
+  factCheckAuto: true
+  summarizeAuto: true
+  active: true
 
-# Center / Mainstream
-- name: "USA Today"
-  url: "http://rssfeeds.usatoday.com/usatoday-NewsTopStories"
-  bias: "center"
+- name: "Fox News"
+  url: "http://feeds.foxnews.com/foxnews/latest"
+  category: "Mainstream"
+  bias: "Right"
+  factCheckAuto: true
+  summarizeAuto: true
+  active: true
 
-# US Government
-- name: "NASA Breaking News"
-  url: "https://www.nasa.gov/rss/dyn/breaking_news.rss"
-  bias: "gov"
+- name: "Reuters"
+  url: "http://feeds.reuters.com/reuters/topNews"
+  category: "International"
+  bias: "Center"
+  factCheckAuto: true
+  summarizeAuto: true
+  active: true
+
+- name: "AP News"
+  url: "https://rsshub.app/apnews/topics/apf-topnews"
+  category: "International"
+  bias: "Center"
+  factCheckAuto: true
+  summarizeAuto: true
+  active: true
+
+- name: "BBC"
+  url: "http://feeds.bbci.co.uk/news/world/rss.xml"
+  category: "International"
+  bias: "Center-Left"
+  factCheckAuto: true
+  summarizeAuto: true
+  active: true
