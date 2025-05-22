@@ -7,7 +7,7 @@ import (
     "strings"
 )
 
-// LoadEnv reads a .env file and sets variables if not already in the environment
+// LoadEnv reads .env and sets environment variables if they are not already set
 func LoadEnv() {
     if _, err := os.Stat(".env"); err == nil {
         file, err := os.Open(".env")
@@ -24,9 +24,10 @@ func LoadEnv() {
                     continue
                 }
                 key := strings.TrimSpace(parts[0])
-                value := strings.Trim(strings.TrimSpace(parts[1]), ""'")
+                // strip surrounding quotes (both " and ')
+                val := strings.Trim(strings.TrimSpace(parts[1]), "\"'")
                 if os.Getenv(key) == "" {
-                    os.Setenv(key, value)
+                    os.Setenv(key, val)
                 }
             }
         }
@@ -42,7 +43,7 @@ func GetEnvOrFail(key string) string {
     return v
 }
 
-// GetEnvOrDefault retrieves an environment variable or returns a default
+// GetEnvOrDefault retrieves an environment variable or returns default
 func GetEnvOrDefault(key, defaultValue string) string {
     v := os.Getenv(key)
     if v == "" {
@@ -54,11 +55,11 @@ func GetEnvOrDefault(key, defaultValue string) string {
 // FileMustExist fatals if a required file is missing
 func FileMustExist(path string) {
     if _, err := os.Stat(path); os.IsNotExist(err) {
-        log.Fatalf("ERROR: Required file not found: %s", path)
+        log.Fatalf("Required file not found: %s", path)
     }
 }
 
-// EnsureDataDir creates the data directory if it doesn't exist
+// EnsureDataDir creates the data directory if it does not exist
 func EnsureDataDir() {
     if _, err := os.Stat("data"); os.IsNotExist(err) {
         os.Mkdir("data", 0755)
