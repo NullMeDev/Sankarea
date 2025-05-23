@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"html"
@@ -384,6 +385,20 @@ func GetCurrentDateFormatted() string {
 func ValidateCronExpression(expression string) bool {
 	_, err := cron.ParseStandard(expression)
 	return err == nil
+}
+
+// EncodeToBase64 encodes a string to base64
+func EncodeToBase64(input string) string {
+	return base64.StdEncoding.EncodeToString([]byte(input))
+}
+
+// DecodeFromBase64 decodes a base64 string
+func DecodeFromBase64(input string) (string, error) {
+	data, err := base64.StdEncoding.DecodeString(input)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
 }
 
 // RecoverFromPanic handles panics gracefully
