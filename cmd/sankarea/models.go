@@ -21,26 +21,9 @@ type Article struct {
     Sentiment float64   `json:"sentiment"`
     FactScore float64   `json:"factScore"`
     Summary   string    `json:"summary"`
-}
-
-// ArticleDigest represents a summarized article for digests
-type ArticleDigest struct {
-    Title     string    `json:"title"`
-    URL       string    `json:"url"`
-    Source    string    `json:"source"`
-    Published time.Time `json:"published"`
-    Category  string    `json:"category"`
     Bias      string    `json:"bias"`
-}
-
-// SentimentAnalysis contains sentiment analysis results
-type SentimentAnalysis struct {
-    Sentiment     string         `json:"sentiment"`
-    Score         float64        `json:"score"`
-    Topics        []string       `json:"topics"`
-    Keywords      []string       `json:"keywords"`
-    EntityCount   map[string]int `json:"entity_count"`
-    IsOpinionated bool          `json:"is_opinionated"`
+    Topics    []string  `json:"topics"`
+    Keywords  []string  `json:"keywords"`
 }
 
 // Source represents a news source
@@ -62,35 +45,6 @@ type Source struct {
     FeedCount      int        `json:"feedCount" yaml:"feedCount"`
     UptimePercent  float64    `json:"uptimePercent" yaml:"uptimePercent"`
     AvgResponseTime int64     `json:"avgResponseTime" yaml:"avgResponseTime"`
-}
-
-// Config represents the application configuration
-type Config struct {
-    Version              string   `json:"version"`
-    BotToken             string   `json:"botToken"`
-    AppID                string   `json:"appId"`
-    GuildID              string   `json:"guildId"`
-    OwnerIDs             []string `json:"ownerIds"`
-    NewsChannelID        string   `json:"newsChannelId"`
-    ErrorChannelID       string   `json:"errorChannelId"`
-    NewsIntervalMinutes  int      `json:"newsIntervalMinutes"`
-    News15MinCron        string   `json:"news15MinCron"`
-    DigestCronSchedule   string   `json:"digestCronSchedule"`
-    MaxPostsPerSource    int      `json:"maxPostsPerSource"`
-    EnableImageEmbed     bool     `json:"enableImageEmbed"`
-    EnableFactCheck      bool     `json:"enableFactCheck"`
-    EnableSummarization  bool     `json:"enableSummarization"`
-    EnableContentFiltering bool   `json:"enableContentFiltering"`
-    EnableKeywordTracking bool    `json:"enableKeywordTracking"`
-    EnableDatabase       bool     `json:"enableDatabase"`
-    EnableDashboard      bool     `json:"enableDashboard"`
-    DashboardPort        int      `json:"dashboardPort"`
-    HealthAPIPort        int      `json:"healthApiPort"`
-    UserAgentString      string   `json:"userAgentString"`
-    FetchNewsOnStartup   bool     `json:"fetchNewsOnStartup"`
-    OpenAIAPIKey         string   `json:"openAiApiKey"`
-    GoogleFactCheckAPIKey string  `json:"googleFactCheckApiKey"`
-    ClaimBustersAPIKey   string  `json:"claimBustersApiKey"`
 }
 
 // State represents the application state
@@ -117,14 +71,6 @@ type State struct {
     LockdownSetBy string    `json:"lockdownSetBy"`
 }
 
-// ErrorEvent represents an error event
-type ErrorEvent struct {
-    Time      time.Time `json:"time"`
-    Component string    `json:"component"`
-    Message   string    `json:"message"`
-    Severity  string    `json:"severity"`
-}
-
 // Metrics represents system metrics
 type Metrics struct {
     MemoryUsageMB     float64 `json:"memoryUsageMb"`
@@ -136,6 +82,14 @@ type Metrics struct {
     APICallsPerHour   float64 `json:"apiCallsPerHour"`
 }
 
+// ErrorEvent represents an error event
+type ErrorEvent struct {
+    Time      time.Time `json:"time"`
+    Component string    `json:"component"`
+    Message   string    `json:"message"`
+    Severity  string    `json:"severity"`
+}
+
 // ErrorBuffer represents a circular buffer of error events
 type ErrorBuffer struct {
     events []*ErrorEvent
@@ -143,12 +97,27 @@ type ErrorBuffer struct {
     mutex  sync.RWMutex
 }
 
-// Permission levels for command access
-const (
-    PermLevelEveryone = iota
-    PermLevelAdmin
-    PermLevelOwner
+// Global state management
+var (
+    state *State
+    mutex sync.RWMutex
 )
+
+// GetState returns a copy of the current state
+func GetState() *State {
+    mutex.RLock()
+    defer mutex.RUnlock()
+    stateCopy := *state
+    return &stateCopy
+}
+
+// UpdateState safely updates the state
+func UpdateState(updater func(*State)) error {
+    mutex.Lock()
+    defer mutex.Unlock()
+    updater(state)
+    return SaveState(state)
+}
 
 // LoadState loads the application state from disk
 func LoadState() (*State, error) {
@@ -163,12 +132,16 @@ func LoadState() (*State, error) {
         return nil, err
     }
 
-    var state State
-    if err := json.Unmarshal(data, &state); err != nil {
+    var newState State
+    if err := json.Unmarshal(data, &newState); err != nil {
         return nil, err
     }
 
-    return &state, nil
+    mutex.Lock()
+    state = &newState
+    mutex.Unlock()
+
+    return state, nil
 }
 
 // SaveState saves the application state to disk
@@ -179,4 +152,37 @@ func SaveState(state *State) error {
     }
 
     return os.WriteFile("data/state.json", data, 0644)
+}
+
+// NewErrorBuffer creates a new error buffer with specified size
+func NewErrorBuffer(size int) *ErrorBuffer {
+    return &ErrorBuffer{
+        events: make([]*ErrorEvent, 0, size),
+        size:   size,
+    }
+}
+
+// Add adds a new error event to the buffer
+func (eb *ErrorBuffer) Add(event *ErrorEvent) {
+    eb.mutex.Lock()
+    defer eb.mutex.Unlock()
+
+    if len(eb.events) >= eb.size {
+        eb.events = eb.events[1:]
+    }
+    eb.events = append(eb.events, event)
+}
+
+// GetRecent returns the most recent error events
+func (eb *ErrorBuffer) GetRecent(count int) []*ErrorEvent {
+    eb.mutex.RLock()
+    defer eb.mutex.RUnlock()
+
+    if count > len(eb.events) {
+        count = len(eb.events)
+    }
+
+    result := make([]*ErrorEvent, count)
+    copy(result, eb.events[len(eb.events)-count:])
+    return result
 }
