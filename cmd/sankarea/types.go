@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -10,7 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
-
+	
 	"github.com/bwmarrin/discordgo"
 	"github.com/robfig/cron/v3"
 )
@@ -153,12 +152,12 @@ type UserFilterManager struct {
 
 // UserFilter represents a user's filtering preferences
 type UserFilter struct {
-	UserID            string   `json:"userId"`
-	DisabledSources   []string `json:"disabledSources"`
+	UserID         string   `json:"userId"`
+	DisabledSources []string `json:"disabledSources"`
 	DisabledCategories []string `json:"disabledCategories"`
-	IncludeKeywords   []string `json:"includeKeywords"`
-	ExcludeKeywords   []string `json:"excludeKeywords"`
-	LastUpdated       time.Time `json:"lastUpdated"`
+	IncludeKeywords []string `json:"includeKeywords"`
+	ExcludeKeywords []string `json:"excludeKeywords"`
+	LastUpdated    time.Time `json:"lastUpdated"`
 }
 
 // NewUserFilterManager creates a new user filter manager
@@ -300,8 +299,23 @@ func (kt *KeywordTracker) Save() error {
 
 // CheckForKeywords checks a text for tracked keywords
 func (kt *KeywordTracker) CheckForKeywords(text string) {
-	// Implementation omitted for brevity
-	// Should scan text for keywords and update stats
+	kt.mutex.Lock()
+	defer kt.mutex.Unlock()
+	
+	// Simple implementation: just check if each keyword is in the text
+	lowerText := strings.ToLower(text)
+	
+	for keyword, stats := range kt.keywords {
+		if strings.Contains(lowerText, strings.ToLower(keyword)) {
+			// Update stats
+			stats.Count++
+			stats.LastSeen = time.Now()
+			if stats.FirstSeen.IsZero() {
+				stats.FirstSeen = time.Now()
+			}
+			kt.keywords[keyword] = stats
+		}
+	}
 }
 
 // DigestManager handles creation and scheduling of news digests
@@ -355,388 +369,19 @@ func (dm *DigestManager) StartScheduler(session *discordgo.Session) error {
 
 // GenerateDigest generates a news digest
 func (dm *DigestManager) GenerateDigest(session *discordgo.Session, channelID string, settings *DigestSettings) error {
-	// Implementation would generate a digest and send it to the specified channel
-	RecordDigestGeneration()
-	
-	return nil
-}
-
-// LanguageManager handles multi-language support
-type LanguageManager struct {
-	translations map[string]map[string]string
-	langFile     string
-	mutex        sync.Mutex
-}
-
-// NewLanguageManager creates a new language manager
-func NewLanguageManager() *LanguageManager {
-	return &LanguageManager{
-		translations: make(map[string]map[string]string),
-		langFile:     "data/translations.json",
-	}
-}
-
-// Initialize sets up the language manager
-func (lm *LanguageManager) Initialize() error {
-	// Create the data directory if it doesn't exist
-	dir := filepath.Dir(lm.langFile)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
-	
-	// Check if translations file exists
-	if _, err := os.Stat(lm.langFile); os.IsNotExist(err) {
-		// Create default translations
-		lm.translations["en"] = map[string]string{
-			"welcome": "Welcome to Sankarea!",
-			"help":    "Use /help for more information",
-		}
-		
-		// Save translations
-		return lm.Save()
-	}
-	
-	// Load existing translations
-	data, err := os.ReadFile(lm.langFile)
+	// Basic implementation
+	sources, err := LoadSources()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to load sources: %w", err)
 	}
 	
-	if len(data) == 0 {
-		// File exists but is empty
-		return nil
-	}
-	
-	// Parse translations
-	if err := json.Unmarshal(data, &lm.translations); err != nil {
-		return err
-	}
-	
-	return nil
-}
-
-// Save persists the translations to disk
-func (lm *LanguageManager) Save() error {
-	lm.mutex.Lock()
-	defer lm.mutex.Unlock()
-	
-	// Marshal translations to JSON
-	data, err := json.MarshalIndent(lm.translations, "", "  ")
-	if err != nil {
-		return err
-	}
-	
-	// Write to file atomically to prevent corruption
-	tempFile := lm.langFile + ".tmp"
-	if err := os.WriteFile(tempFile, data, 0644); err != nil {
-		return err
-	}
-	
-	// Then rename to the actual file
-	return os.Rename(tempFile, lm.langFile)
-}
-
-// CredibilityScorer scores news sources on credibility
-type CredibilityScorer struct {
-	scores    map[string]float64
-	scoresFile string
-	mutex     sync.Mutex
-}
-
-// NewCredibilityScorer creates a new credibility scorer
-func NewCredibilityScorer() *CredibilityScorer {
-	return &CredibilityScorer{
-		scores:     make(map[string]float64),
-		scoresFile: "data/credibility.json",
-	}
-}
-
-// Initialize sets up the credibility scorer
-func (cs *CredibilityScorer) Initialize() error {
-	// Create the data directory if it doesn't exist
-	dir := filepath.Dir(cs.scoresFile)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
-	
-	// Check if scores file exists
-	if _, err := os.Stat(cs.scoresFile); os.IsNotExist(err) {
-		// Create empty scores file
-		return cs.Save()
-	}
-	
-	// Load existing scores
-	data, err := os.ReadFile(cs.scoresFile)
-	if err != nil {
-		return err
-	}
-	
-	if len(data) == 0 {
-		// File exists but is empty
-		return nil
-	}
-	
-	// Parse scores
-	if err := json.Unmarshal(data, &cs.scores); err != nil {
-		return err
-	}
-	
-	return nil
-}
-
-// Save persists the scores to disk
-func (cs *CredibilityScorer) Save() error {
-	cs.mutex.Lock()
-	defer cs.mutex.Unlock()
-	
-	// Marshal scores to JSON
-	data, err := json.MarshalIndent(cs.scores, "", "  ")
-	if err != nil {
-		return err
-	}
-	
-	// Write to file atomically to prevent corruption
-	tempFile := cs.scoresFile + ".tmp"
-	if err := os.WriteFile(tempFile, data, 0644); err != nil {
-		return err
-	}
-	
-	// Then rename to the actual file
-	return os.Rename(tempFile, cs.scoresFile)
-}
-
-// AnalyticsEngine tracks usage statistics
-type AnalyticsEngine struct {
-	data      map[string]interface{}
-	dataFile  string
-	mutex     sync.Mutex
-}
-
-// NewAnalyticsEngine creates a new analytics engine
-func NewAnalyticsEngine() *AnalyticsEngine {
-	return &AnalyticsEngine{
-		data:     make(map[string]interface{}),
-		dataFile: "data/analytics/analytics.json",
-	}
-}
-
-// Initialize sets up the analytics engine
-func (ae *AnalyticsEngine) Initialize() error {
-	// Create the data directory if it doesn't exist
-	dir := filepath.Dir(ae.dataFile)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
-	
-	// Check if data file exists
-	if _, err := os.Stat(ae.dataFile); os.IsNotExist(err) {
-		// Create empty data file
-		return ae.Save()
-	}
-	
-	// Load existing data
-	data, err := os.ReadFile(ae.dataFile)
-	if err != nil {
-		return err
-	}
-	
-	if len(data) == 0 {
-		// File exists but is empty
-		return nil
-	}
-	
-	// Parse data
-	if err := json.Unmarshal(data, &ae.data); err != nil {
-		return err
-	}
-	
-	return nil
-}
-
-// Save persists the analytics data to disk
-func (ae *AnalyticsEngine) Save() error {
-	ae.mutex.Lock()
-	defer ae.mutex.Unlock()
-	
-	// Marshal data to JSON
-	data, err := json.MarshalIndent(ae.data, "", "  ")
-	if err != nil {
-		return err
-	}
-	
-	// Write to file atomically to prevent corruption
-	tempFile := ae.dataFile + ".tmp"
-	if err := os.WriteFile(tempFile, data, 0644); err != nil {
-		return err
-	}
-	
-	// Then rename to the actual file
-	return os.Rename(tempFile, ae.dataFile)
-}
-
-// Logger returns a logger for the application
-func Logger() *log.Logger {
-	// Use a once to initialize the logger
-	loggerOnce.Do(func() {
-		if appLogger == nil {
-			appLogger = log.New(os.Stdout, "SANKAREA: ", log.LstdFlags)
-		}
-	})
-	
-	return appLogger
-}
-
-// Global logger
-var (
-	appLogger  *log.Logger
-	loggerOnce sync.Once
-)
-
-// FileMustExist ensures a file exists or creates it with default content
-func FileMustExist(path string) {
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		// Ensure directory exists
-		dir := filepath.Dir(path)
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			log.Fatalf("Failed to create directory for %s: %v", path, err)
-		}
-		
-		// Create empty file
-		var defaultContent []byte
-		
-		// Set default content based on file extension
-		switch filepath.Ext(path) {
-		case ".json":
-			defaultContent = []byte("{}")
-		case ".yml", ".yaml":
-			defaultContent = []byte("---\n")
-		default:
-			defaultContent = []byte("")
-		}
-		
-		if err := os.WriteFile(path, defaultContent, 0644); err != nil {
-			log.Fatalf("Failed to create file %s: %v", path, err)
+	// Filter active sources
+	var activeSources []Source
+	for _, source := range sources {
+		if !source.Paused {
+			activeSources = append(activeSources, source)
 		}
 	}
-}
-
-// LoadEnv loads environment variables from .env file
-func LoadEnv() {
-	// Check if .env file exists
-	if _, err := os.Stat(".env"); os.IsNotExist(err) {
-		// No .env file, nothing to do
-		return
-	}
 	
-	// Read .env file
-	data, err := os.ReadFile(".env")
-	if err != nil {
-		log.Printf("Warning: Could not read .env file: %v", err)
-		return
-	}
+	// Create digest message
 	
-	// Parse .env file
-	lines := strings.Split(string(data), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			// Skip empty lines and comments
-			continue
-		}
-		
-		parts := strings.SplitN(line, "=", 2)
-		if len(parts) != 2 {
-			// Invalid line format
-			continue
-		}
-		
-		key := strings.TrimSpace(parts[0])
-		value := strings.TrimSpace(parts[1])
-		
-		// Remove surrounding quotes if present
-		if len(value) >= 2 && (value[0] == '"' || value[0] == '\'') && value[0] == value[len(value)-1] {
-			value = value[1 : len(value)-1]
-		}
-		
-		// Set environment variable
-		os.Setenv(key, value)
-	}
-}
-
-// SetupLogging configures logging to file and console
-func SetupLogging() error {
-	// Ensure logs directory exists
-	if err := os.MkdirAll("logs", 0755); err != nil {
-		return fmt.Errorf("failed to create logs directory: %w", err)
-	}
-	
-	// Open log file
-	logFile := fmt.Sprintf("logs/sankarea_%s.log", time.Now().Format("2006-01-02"))
-	f, err := os.OpenFile(logFile, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to open log file: %w", err)
-	}
-	
-	// Create multi-writer for console and file
-	mw := io.MultiWriter(os.Stdout, f)
-	
-	// Set up logger
-	loggerOnce.Do(func() {
-		appLogger = log.New(mw, "SANKAREA: ", log.LstdFlags)
-	})
-	
-	return nil
-}
-
-// InitDB initializes the database connection
-func InitDB() error {
-	// Implementation would initialize database connection
-	return nil
-}
-
-// StartHealthServer starts the health API server
-func StartHealthServer(port int) {
-	// Implementation would start an HTTP server for health monitoring
-	go func() {
-		defer RecoverFromPanic("health-server")
-		
-		Logger().Printf("Starting health API server on port %d", port)
-		
-		// Simple implementation would be:
-		// http.HandleFunc("/health", handleHealth)
-		// http.ListenAndServe(fmt.Sprintf(":%d", port), nil)
-	}()
-}
-
-// StartDashboard starts the web dashboard
-func StartDashboard() error {
-	// Implementation would start the web dashboard
-	go func() {
-		defer RecoverFromPanic("dashboard")
-		
-		Logger().Println("Starting dashboard...")
-		
-		// Dashboard implementation would go here
-	}()
-	
-	return nil
-}
-
-// formatDuration formats a duration in a human-readable format
-func formatDuration(d time.Duration) string {
-	days := int(d.Hours() / 24)
-	hours := int(d.Hours()) % 24
-	minutes := int(d.Minutes()) % 60
-	seconds := int(d.Seconds()) % 60
-	
-	if days > 0 {
-		return fmt.Sprintf("%dd %dh %dm %ds", days, hours, minutes, seconds)
-	}
-	if hours > 0 {
-		return fmt.Sprintf("%dh %dm %ds", hours, minutes, seconds)
-	}
-	if minutes > 0 {
-		return fmt.Sprintf("%dm %ds", minutes, seconds)
-	}
-	return fmt.Sprintf("%ds", seconds)
-}
