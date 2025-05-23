@@ -135,14 +135,18 @@ func main() {
 
 	// Start the dashboard
 	if cfg.EnableDashboard {
-		StartDashboard()
+		if err := StartDashboard(); err != nil {
+			Logger().Printf("Warning: Dashboard initialization failed: %v", err)
+		}
 	}
 
 	// Start news update cron
 	startNewsUpdateCron()
 
 	// Start digest scheduler
-	digester.StartScheduler(dg)
+	if err := digester.StartScheduler(dg); err != nil {
+		Logger().Printf("Warning: Digest scheduler initialization failed: %v", err)
+	}
 
 	// Wait for termination signal
 	Logger().Println("Bot is now running. Press CTRL+C to exit.")
@@ -723,6 +727,7 @@ func registerCommands() {
 	}
 }
 
+// handleMessage processes incoming Discord messages
 func handleMessage(s *discordgo.Session, m *discordgo.MessageCreate) {
 	// Ignore messages from the bot itself
 	if m.Author.ID == s.State.User.ID {
@@ -741,11 +746,36 @@ func handleMessage(s *discordgo.Session, m *discordgo.MessageCreate) {
 	}
 	
 	// Track any keywords in the message
-	if keywordTracker != nil {
+	if keywordTracker != nil && cfg.EnableKeywordTracking {
 		go func() {
 			defer RecoverFromPanic("keyword-tracker")
 			keywordTracker.CheckForKeywords(m.Content)
 		}()
+	}
+}
+
+// handleDirectMessage handles direct messages to the bot
+func handleDirectMessage(s *discordgo.Session, m *discordgo.MessageCreate) {
+	content := strings.TrimSpace(m.Content)
+	
+	// Simple DM handling
+	switch {
+	case strings.HasPrefix(content, "help"):
+		s.ChannelMessageSend(m.ChannelID, "You can use slash commands like /help in servers where I'm added. Direct message support is limited.")
+	case strings.HasPrefix(content, "status"):
+		status := GetSystemStatus()
+		uptime := time.Duration(status["uptime_seconds"].(int64)) * time.Second
+		
+		msg := fmt.Sprintf("**Status:** %s\n", status["status"])
+		msg += fmt.Sprintf("**Version:** %s\n", status["version"])
+		msg += fmt.Sprintf("**Uptime:** %s\n", formatDuration(uptime))
+		msg += fmt.Sprintf("**Feed Count:** %d\n", status["feed_count"])
+		
+		s.ChannelMessageSend(m.ChannelID, msg)
+	case strings.HasPrefix(content, "version"):
+		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Sankarea Bot v%s by %s", VERSION, "NullMeDevok"))
+	default:
+		s.ChannelMessageSend(m.ChannelID, "I don't understand that command. Type 'help' for assistance.")
 	}
 }
 
@@ -756,13 +786,6 @@ func isDM(s *discordgo.Session, m *discordgo.MessageCreate) bool {
 	}
 	
 	return channel.Type == discordgo.ChannelTypeDM
-}
-
-func handleDirectMessage(s *discordgo.Session, m *discordgo.MessageCreate) {
-	// Simple DM handling
-	if strings.HasPrefix(m.Content, "help") {
-		s.ChannelMessageSend(m.ChannelID, "You can use slash commands like /help in servers where I'm added. Direct message support is limited.")
-	}
 }
 
 func handleLegacyCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
