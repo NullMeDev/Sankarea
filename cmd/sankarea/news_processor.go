@@ -3,12 +3,13 @@ package main
 
 import (
     "context"
+    "crypto/sha256"
+    "encoding/hex"
     "fmt"
     "html"
     "io"
     "net/http"
     "strings"
-    "sync"
     "time"
 
     "github.com/mmcdole/gofeed"
@@ -18,42 +19,48 @@ import (
 type NewsProcessor struct {
     parser      *gofeed.Parser
     client      *http.Client
-    cache       map[string]time.Time
-    cacheMutex  sync.RWMutex
+    bot         *Bot
     maxArticles int
 }
 
 // NewNewsProcessor creates a new NewsProcessor instance
-func NewNewsProcessor() *NewsProcessor {
+func NewNewsProcessor(bot *Bot) *NewsProcessor {
     return &NewsProcessor{
         parser: gofeed.NewParser(),
         client: &http.Client{
             Timeout: 30 * time.Second,
         },
-        cache:       make(map[string]time.Time),
-        maxArticles: 5, // Default max articles per source
+        bot:         bot,
+        maxArticles: 5,
     }
 }
 
 // ProcessFeeds fetches and processes all enabled feeds
-func (np *NewsProcessor) ProcessFeeds(ctx context.Context, sources []Source) ([]*NewsArticle, error) {
+func (np *NewsProcessor) ProcessFeeds(ctx context.Context, sources []NewsSource) ([]*NewsArticle, error) {
     var (
         articles = make([]*NewsArticle, 0)
-        wg       sync.WaitGroup
-        mu       sync.Mutex
         results  = make(chan *NewsArticle, len(sources)*np.maxArticles)
         errors   = make(chan error, len(sources))
     )
 
+    // Create a wait group to track goroutines
+    var wg sync.WaitGroup
+    wg.Add(len(sources))
+
     // Process each source concurrently
     for _, source := range sources {
-        wg.Add(1)
-        go func(src Source) {
+        if source.Paused {
+            wg.Done()
+            continue
+        }
+
+        go func(src NewsSource) {
             defer wg.Done()
             
             // Fetch and process the feed
             feedArticles, err := np.processFeed(ctx, src)
             if err != nil {
+                np.bot.logger.Error("Error processing %s: %v", src.Name, err)
                 errors <- fmt.Errorf("error processing %s: %v", src.Name, err)
                 return
             }
@@ -96,7 +103,7 @@ func (np *NewsProcessor) ProcessFeeds(ctx context.Context, sources []Source) ([]
 }
 
 // processFeed fetches and processes a single feed
-func (np *NewsProcessor) processFeed(ctx context.Context, source Source) ([]*NewsArticle, error) {
+func (np *NewsProcessor) processFeed(ctx context.Context, source NewsSource) ([]*NewsArticle, error) {
     // Check context cancellation
     if ctx.Err() != nil {
         return nil, ctx.Err()
@@ -105,6 +112,7 @@ func (np *NewsProcessor) processFeed(ctx context.Context, source Source) ([]*New
     // Create request with context
     req, err := http.NewRequestWithContext(ctx, "GET", source.URL, nil)
     if err != nil {
+        np.logFeedError(source, err)
         return nil, fmt.Errorf("failed to create request: %v", err)
     }
 
@@ -114,19 +122,28 @@ func (np *NewsProcessor) processFeed(ctx context.Context, source Source) ([]*New
     // Fetch feed
     resp, err := np.client.Do(req)
     if err != nil {
+        np.logFeedError(source, err)
         return nil, fmt.Errorf("failed to fetch feed: %v", err)
     }
     defer resp.Body.Close()
 
+    if resp.StatusCode != http.StatusOK {
+        err := fmt.Errorf("HTTP %d: %s", resp.StatusCode, resp.Status)
+        np.logFeedError(source, err)
+        return nil, err
+    }
+
     // Read response body
     body, err := io.ReadAll(resp.Body)
     if err != nil {
+        np.logFeedError(source, err)
         return nil, fmt.Errorf("failed to read response: %v", err)
     }
 
     // Parse feed
     feed, err := np.parser.ParseString(string(body))
     if err != nil {
+        np.logFeedError(source, err)
         return nil, fmt.Errorf("failed to parse feed: %v", err)
     }
 
@@ -138,19 +155,29 @@ func (np *NewsProcessor) processFeed(ctx context.Context, source Source) ([]*New
             break
         }
 
-        // Skip if article is already processed
-        if np.isArticleProcessed(item.GUID) {
+        // Generate unique ID for article
+        articleID := np.generateArticleID(item)
+        
+        // Check if article exists in database
+        existing, err := np.bot.database.GetArticle(articleID)
+        if err != nil {
+            np.bot.logger.Error("Failed to check article existence: %v", err)
+            continue
+        }
+        if existing != nil {
             continue
         }
 
         // Create article
         article := &NewsArticle{
+            ID:          articleID,
             Title:       html.UnescapeString(item.Title),
+            Content:     np.processContent(item),
             URL:         item.Link,
-            Description: np.processDescription(item.Description),
+            Source:      source.Name,
             Category:    source.Category,
-            SourceName:  source.Name,
             PublishedAt: np.getPublishDate(item),
+            FetchedAt:   time.Now(),
         }
 
         // Extract image if available
@@ -160,53 +187,71 @@ func (np *NewsProcessor) processFeed(ctx context.Context, source Source) ([]*New
             article.ImageURL = enclosure.URL
         }
 
+        // Perform fact checking if enabled for this source
+        if source.FactCheck {
+            if result, err := np.bot.factChecker.Check(article); err != nil {
+                np.bot.logger.Error("Fact check failed for %s: %v", article.Title, err)
+            } else {
+                article.FactCheckResult = result
+            }
+        }
+
+        // Save article to database
+        if err := np.bot.database.SaveArticle(article); err != nil {
+            np.bot.logger.Error("Failed to save article: %v", err)
+            continue
+        }
+
         articles = append(articles, article)
-        np.markArticleProcessed(item.GUID)
     }
+
+    // Update feed stats on successful processing
+    np.updateFeedStats(source, len(articles), nil)
 
     return articles, nil
 }
 
-// isArticleProcessed checks if an article has been processed
-func (np *NewsProcessor) isArticleProcessed(guid string) bool {
-    np.cacheMutex.RLock()
-    defer np.cacheMutex.RUnlock()
-    
-    processedTime, exists := np.cache[guid]
-    if !exists {
-        return false
+// generateArticleID creates a unique ID for an article
+func (np *NewsProcessor) generateArticleID(item *gofeed.Item) string {
+    // Use GUID if available
+    if item.GUID != "" {
+        return fmt.Sprintf("guid:%x", sha256.Sum256([]byte(item.GUID)))
     }
     
-    // Remove from cache if older than 24 hours
-    if time.Since(processedTime) > 24*time.Hour {
-        delete(np.cache, guid)
-        return false
+    // Fall back to URL
+    if item.Link != "" {
+        return fmt.Sprintf("url:%x", sha256.Sum256([]byte(item.Link)))
     }
     
-    return true
+    // Last resort: hash of title and publish date
+    data := item.Title
+    if item.PublishedParsed != nil {
+        data += item.PublishedParsed.String()
+    }
+    
+    hash := sha256.Sum256([]byte(data))
+    return fmt.Sprintf("content:%s", hex.EncodeToString(hash[:]))
 }
 
-// markArticleProcessed marks an article as processed
-func (np *NewsProcessor) markArticleProcessed(guid string) {
-    np.cacheMutex.Lock()
-    defer np.cacheMutex.Unlock()
-    np.cache[guid] = time.Now()
-}
-
-// processDescription cleans and truncates the description
-func (np *NewsProcessor) processDescription(desc string) string {
-    // Unescape HTML entities
-    desc = html.UnescapeString(desc)
+// processContent processes the article content
+func (np *NewsProcessor) processContent(item *gofeed.Item) string {
+    var content string
     
-    // Remove HTML tags
-    desc = stripHTML(desc)
-    
-    // Truncate if too long (Discord limit is 2048 characters)
-    if len(desc) > 2000 {
-        desc = desc[:1997] + "..."
+    // Prefer full content if available
+    if item.Content != "" {
+        content = item.Content
+    } else if item.Description != "" {
+        content = item.Description
+    } else {
+        return item.Title // Fallback to title if no content available
     }
-    
-    return strings.TrimSpace(desc)
+
+    // Clean content
+    content = html.UnescapeString(content)
+    content = stripHTML(content)
+    content = strings.TrimSpace(content)
+
+    return content
 }
 
 // getPublishDate gets the publish date of an article
@@ -247,4 +292,31 @@ func stripHTML(input string) string {
     }
     
     return output.String()
+}
+
+// logFeedError logs a feed processing error
+func (np *NewsProcessor) logFeedError(source NewsSource, err error) {
+    event := &ErrorEvent{
+        Component: "NewsProcessor",
+        Message:   fmt.Sprintf("Error processing feed %s: %v", source.Name, err),
+        Severity:  "ERROR",
+        Time:     time.Now(),
+    }
+    
+    if err := np.bot.database.LogError(event); err != nil {
+        np.bot.logger.Error("Failed to log feed error: %v", err)
+    }
+}
+
+// updateFeedStats updates the feed statistics
+func (np *NewsProcessor) updateFeedStats(source NewsSource, articleCount int, err error) {
+    source.LastFetch = time.Now()
+    
+    if err == nil {
+        np.bot.logger.Info("Successfully processed %d articles from %s", articleCount, source.Name)
+    }
+    
+    if err := np.bot.database.SaveSource(&source); err != nil {
+        np.bot.logger.Error("Failed to update feed stats: %v", err)
+    }
 }
