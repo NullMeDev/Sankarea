@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -55,6 +56,7 @@ type Config struct {
 	MaxPostsPerSource    int             `json:"maxPostsPerSource"`
 	OwnerIDs             []string        `json:"ownerIDs"` // Discord User IDs who have owner permissions
 	AdminRoleIDs         []string        `json:"adminRoleIDs"` // Discord Role IDs that have admin permissions
+	UserAgentString      string          `json:"user_agent_string"` // For HTTP requests
 	
 	// Channels Configuration
 	NewsChannelID        string          `json:"newsChannelId"`
@@ -137,27 +139,29 @@ func LoadConfig() (*Config, error) {
 			DefaultDigestFormat: "compact",
 			EnableHealthMonitor: true,
 			FetchNewsOnStartup:  true,
+			UserAgentString:     "Sankarea/1.0 RSS Reader Bot",
 		}
 		
 		// Check for environment variables to override defaults
-		if token := os.Getenv("DISCORD_BOT_TOKEN"); token != "" {
+		// Trim whitespace to avoid accidental issues
+		if token := strings.TrimSpace(os.Getenv("DISCORD_BOT_TOKEN")); token != "" {
 			defaultConfig.BotToken = token
 		}
 		
-		if appID := os.Getenv("DISCORD_APPLICATION_ID"); appID != "" {
+		if appID := strings.TrimSpace(os.Getenv("DISCORD_APPLICATION_ID")); appID != "" {
 			defaultConfig.AppID = appID
 		}
 		
-		if guildID := os.Getenv("DISCORD_GUILD_ID"); guildID != "" {
+		if guildID := strings.TrimSpace(os.Getenv("DISCORD_GUILD_ID")); guildID != "" {
 			defaultConfig.GuildID = guildID
 		}
 		
-		if channelID := os.Getenv("DISCORD_CHANNEL_ID"); channelID != "" {
+		if channelID := strings.TrimSpace(os.Getenv("DISCORD_CHANNEL_ID")); channelID != "" {
 			defaultConfig.NewsChannelID = channelID
 			defaultConfig.DigestChannelID = channelID
 		}
 		
-		if openAIKey := os.Getenv("OPENAI_API_KEY"); openAIKey != "" {
+		if openAIKey := strings.TrimSpace(os.Getenv("OPENAI_API_KEY")); openAIKey != "" {
 			defaultConfig.OpenAIAPIKey = openAIKey
 			defaultConfig.EnableSummarization = true
 		}
@@ -186,6 +190,11 @@ func LoadConfig() (*Config, error) {
 		config.Version = VERSION
 	}
 	
+	// Set default user agent if not set
+	if config.UserAgentString == "" {
+		config.UserAgentString = "Sankarea/1.0 RSS Reader Bot"
+	}
+	
 	return &config, nil
 }
 
@@ -202,20 +211,26 @@ func SaveConfig(config *Config) error {
 		return err
 	}
 	
-	// Write to file
-	return os.WriteFile(configFilePath, data, 0644)
+	// Write to file atomically to prevent corruption
+	tempFile := configFilePath + ".tmp"
+	if err := os.WriteFile(tempFile, data, 0644); err != nil {
+		return err
+	}
+	
+	// Then rename to the actual file (atomic operation on most file systems)
+	return os.Rename(tempFile, configFilePath)
 }
 
 // LoadSources loads RSS feed sources from the sources.yml file
 func LoadSources() ([]Source, error) {
-	// Check if file exists, create empty file if not
+	// Check if file exists, create if not
 	if _, err := os.Stat(sourcesFilePath); os.IsNotExist(err) {
 		if err := os.MkdirAll(filepath.Dir(sourcesFilePath), 0755); err != nil {
 			return nil, err
 		}
 		
-		// Create empty file with empty sources array
-		if err := os.WriteFile(sourcesFilePath, []byte("[]"), 0644); err != nil {
+		// Create empty file with empty YAML sources array
+		if err := os.WriteFile(sourcesFilePath, []byte("sources: []"), 0644); err != nil {
 			return nil, err
 		}
 		
@@ -228,19 +243,27 @@ func LoadSources() ([]Source, error) {
 		return nil, err
 	}
 	
-	var sources []Source
+	var sources struct {
+		Sources []Source `yaml:"sources"`
+	}
+	
 	if err := yaml.Unmarshal(data, &sources); err != nil {
-		return nil, err
+		// Try with direct unmarshaling if the structure doesn't match
+		var directSources []Source
+		if err := yaml.Unmarshal(data, &directSources); err != nil {
+			return nil, fmt.Errorf("failed to parse sources file: %w", err)
+		}
+		sources.Sources = directSources
 	}
 	
 	// Ensure all sources have active flag set properly
-	for i := range sources {
-		if !sources[i].Paused && sources[i].Active == false {
-			sources[i].Active = true
+	for i := range sources.Sources {
+		if !sources.Sources[i].Paused && sources.Sources[i].Active == false {
+			sources.Sources[i].Active = true
 		}
 	}
 	
-	return sources, nil
+	return sources.Sources, nil
 }
 
 // SaveSources saves RSS feed sources to the sources.yml file
@@ -250,23 +273,36 @@ func SaveSources(sources []Source) error {
 		return err
 	}
 	
+	// Wrap sources in a proper YAML structure
+	wrappedSources := struct {
+		Sources []Source `yaml:"sources"`
+	}{
+		Sources: sources,
+	}
+	
 	// Marshal sources to YAML
-	data, err := yaml.Marshal(sources)
+	data, err := yaml.Marshal(wrappedSources)
 	if err != nil {
 		return err
 	}
 	
-	// Write to file
-	return os.WriteFile(sourcesFilePath, data, 0644)
+	// Write to file atomically to prevent corruption
+	tempFile := sourcesFilePath + ".tmp"
+	if err := os.WriteFile(tempFile, data, 0644); err != nil {
+		return err
+	}
+	
+	// Then rename to the actual file (atomic operation on most file systems)
+	return os.Rename(tempFile, sourcesFilePath)
 }
 
 // ConfigManager watches for config changes and reloads when necessary
 type ConfigManager struct {
-	configPath   string
+	configPath    string
 	checkInterval time.Duration
-	lastModTime  time.Time
+	lastModTime   time.Time
 	reloadHandler func(*Config)
-	stopChan     chan struct{}
+	stopChan      chan struct{}
 }
 
 // NewConfigManager creates a new config manager
@@ -292,6 +328,8 @@ func (m *ConfigManager) SetReloadHandler(handler func(*Config)) {
 // StartWatching starts watching for config changes
 func (m *ConfigManager) StartWatching() {
 	go func() {
+		defer RecoverFromPanic("config-watcher")
+		
 		ticker := time.NewTicker(m.checkInterval)
 		defer ticker.Stop()
 		
