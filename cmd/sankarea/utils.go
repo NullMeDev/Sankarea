@@ -370,24 +370,20 @@ func SetupLogging() error {
 
 // IncrementAPIRequestCount increases the API request counter
 func IncrementAPIRequestCount() {
-	// This is a placeholder - would actually update a counter in state
-	// or analytics system in a full implementation
+	stateMutex.Lock()
+	defer stateMutex.Unlock()
+	state.TotalAPICalls++
 }
 
-// getCurrentDateFormatted returns the current date formatted for reports
+// GetCurrentDateFormatted returns the current date formatted for reports
 func GetCurrentDateFormatted() string {
 	return time.Now().Format("2006-01-02 15:04:05")
 }
 
-// validateCronExpression validates a cron expression string
+// ValidateCronExpression validates a cron expression string
 func ValidateCronExpression(expression string) bool {
 	_, err := cron.ParseStandard(expression)
 	return err == nil
-}
-
-// EncodeToBase64 encodes a string to base64
-func EncodeToBase64(input string) string {
-	return input // Placeholder - would use proper base64 encoding
 }
 
 // RecoverFromPanic handles panics gracefully
