@@ -5,21 +5,16 @@ import (
     "context"
     "fmt"
     "net/http"
+    "sort"
     "strings"
     "sync"
     "time"
 
+    "github.com/bwmarrin/discordgo"
     "github.com/mmcdole/gofeed"
 )
 
-const (
-    maxConcurrentFeeds = 5
-    feedTimeout        = 30 * time.Second
-    maxRetries        = 3
-    retryDelay        = 5 * time.Second
-)
-
-// NewsProcessor handles news feed processing
+// NewsProcessor handles news feed processing and Discord integration
 type NewsProcessor struct {
     client    *http.Client
     parser    *gofeed.Parser
@@ -32,83 +27,99 @@ type NewsProcessor struct {
 func NewNewsProcessor() *NewsProcessor {
     return &NewsProcessor{
         client: &http.Client{
-            Timeout: feedTimeout,
+            Timeout: DefaultTimeout,
         },
         parser:    gofeed.NewParser(),
         cache:     make(map[string]time.Time),
-        semaphore: make(chan struct{}, maxConcurrentFeeds),
+        semaphore: make(chan struct{}, MaxConcurrentFeeds),
     }
 }
 
-// fetchNewsWithContext fetches news with context support
-func fetchNewsWithContext(ctx context.Context) error {
-    processor := NewNewsProcessor()
-    sources := loadSources()
-
-    // Filter active sources
-    activeSources := make([]Source, 0)
-    for _, source := range sources {
-        if !source.Paused && source.Active {
-            activeSources = append(activeSources, source)
-        }
+// ProcessNews fetches and processes news from all sources
+func (np *NewsProcessor) ProcessNews(ctx context.Context, s *discordgo.Session) error {
+    startTime := time.Now()
+    
+    // Load active sources
+    sources, err := LoadSources()
+    if err != nil {
+        return NewNewsError(ErrNewsFetch, "failed to load sources", err)
     }
 
+    // Filter active sources
+    activeSources := filterActiveSources(sources)
     if len(activeSources) == 0 {
-        return fmt.Errorf("no active sources configured")
+        return NewNewsError(ErrNewsFetch, "no active sources configured", nil)
     }
 
     // Create error channel for collecting errors
     errCh := make(chan error, len(activeSources))
+    articleCh := make(chan *NewsArticle, len(activeSources)*10)
     var wg sync.WaitGroup
 
     // Process each source
     for _, source := range activeSources {
         wg.Add(1)
-        go func(src Source) {
+        go func(src NewsSource) {
             defer wg.Done()
-            if err := processor.processFeed(ctx, src); err != nil {
-                errCh <- fmt.Errorf("error processing %s: %v", src.Name, err)
-                
-                // Update source error stats
+            defer RecoverFromPanic(fmt.Sprintf("news-fetch-%s", src.Name))
+
+            if err := np.processFeed(ctx, src, articleCh); err != nil {
+                errCh <- err
                 updateSourceError(src.Name, err)
             }
         }(source)
     }
 
-    // Wait for all goroutines to finish
+    // Wait for all fetches to complete
     go func() {
         wg.Wait()
+        close(articleCh)
         close(errCh)
     }()
 
-    // Collect errors
-    var errors []string
-    for err := range errCh {
-        errors = append(errors, err.Error())
+    // Collect and process articles
+    var articles []*NewsArticle
+    for article := range articleCh {
+        articles = append(articles, article)
     }
 
-    // Update state after fetch
+    // Sort and filter articles
+    articles = np.processArticles(articles)
+
+    // Post articles to Discord
+    if err := np.postArticles(s, articles); err != nil {
+        return NewNewsError(ErrNewsParser, "failed to post articles", err)
+    }
+
+    // Collect errors
+    var errors []error
+    for err := range errCh {
+        errors = append(errors, err)
+    }
+
+    // Update state after processing
     if err := UpdateState(func(s *State) {
         s.LastFetchTime = time.Now()
-        s.FeedCount += len(activeSources)
+        s.ArticleCount += len(articles)
+        s.LastInterval = int(time.Since(startTime).Minutes())
         if len(errors) > 0 {
-            s.LastError = strings.Join(errors, "; ")
-            s.LastErrorTime = time.Now()
             s.ErrorCount += len(errors)
+            s.LastError = errors[0].Error()
+            s.LastErrorTime = time.Now()
         }
     }); err != nil {
         Logger().Printf("Failed to update state after news fetch: %v", err)
     }
 
     if len(errors) > 0 {
-        return fmt.Errorf("encountered errors while fetching news: %s", strings.Join(errors, "; "))
+        return fmt.Errorf("encountered %d errors while fetching news", len(errors))
     }
 
     return nil
 }
 
 // processFeed handles fetching and processing a single feed
-func (np *NewsProcessor) processFeed(ctx context.Context, source Source) error {
+func (np *NewsProcessor) processFeed(ctx context.Context, source NewsSource, articleCh chan<- *NewsArticle) error {
     // Acquire semaphore
     select {
     case np.semaphore <- struct{}{}:
@@ -122,34 +133,17 @@ func (np *NewsProcessor) processFeed(ctx context.Context, source Source) error {
     lastFetch, exists := np.cache[source.URL]
     np.mutex.RUnlock()
 
-    if exists && time.Since(lastFetch) < time.Duration(cfg.NewsIntervalMinutes)*time.Minute {
+    if exists && time.Since(lastFetch) < time.Duration(cfg.MinFetchInterval)*time.Minute {
         return nil
     }
 
-    // Fetch and process feed with retries
-    var feed *gofeed.Feed
-    var err error
-    for attempt := 1; attempt <= maxRetries; attempt++ {
-        feed, err = np.fetchFeedWithContext(ctx, source)
-        if err == nil {
-            break
-        }
-        if attempt < maxRetries {
-            select {
-            case <-ctx.Done():
-                return ctx.Err()
-            case <-time.After(retryDelay):
-                continue
-            }
-        }
-    }
-    if err != nil {
-        return fmt.Errorf("failed to fetch feed after %d attempts: %v", maxRetries, err)
-    }
+    // Set user agent
+    np.parser.UserAgent = cfg.UserAgentString
 
-    // Process feed items
-    if err := np.processItems(ctx, source, feed); err != nil {
-        return fmt.Errorf("failed to process items: %v", err)
+    // Fetch and parse feed
+    feed, err := np.parser.ParseURL(source.URL)
+    if err != nil {
+        return NewNewsError(ErrNewsFetch, fmt.Sprintf("failed to parse feed for %s", source.Name), err)
     }
 
     // Update cache
@@ -157,60 +151,69 @@ func (np *NewsProcessor) processFeed(ctx context.Context, source Source) error {
     np.cache[source.URL] = time.Now()
     np.mutex.Unlock()
 
+    // Process feed items
+    for _, item := range feed.Items {
+        article := convertFeedItemToArticle(item, source)
+        articleCh <- article
+    }
+
     return nil
 }
 
-// fetchFeedWithContext fetches a feed with context support
-func (np *NewsProcessor) fetchFeedWithContext(ctx context.Context, source Source) (*gofeed.Feed, error) {
-    req, err := http.NewRequestWithContext(ctx, "GET", source.URL, nil)
-    if err != nil {
-        return nil, fmt.Errorf("failed to create request: %v", err)
+// processArticles sorts and filters articles
+func (np *NewsProcessor) processArticles(articles []*NewsArticle) []*NewsArticle {
+    // Sort by publish date
+    sort.Slice(articles, func(i, j int) bool {
+        return articles[i].PublishedAt.After(articles[j].PublishedAt)
+    })
+
+    // Filter duplicates and old articles
+    seen := make(map[string]bool)
+    cutoff := time.Now().Add(-24 * time.Hour)
+    filtered := make([]*NewsArticle, 0)
+
+    for _, article := range articles {
+        // Skip old articles
+        if article.PublishedAt.Before(cutoff) {
+            continue
+        }
+
+        // Skip duplicates (based on title similarity)
+        if seen[normalizeTitle(article.Title)] {
+            continue
+        }
+        seen[normalizeTitle(article.Title)] = true
+
+        filtered = append(filtered, article)
     }
 
-    // Set user agent
-    req.Header.Set("User-Agent", cfg.UserAgentString)
-
-    resp, err := np.client.Do(req)
-    if err != nil {
-        return nil, fmt.Errorf("failed to fetch feed: %v", err)
-    }
-    defer resp.Body.Close()
-
-    if resp.StatusCode != http.StatusOK {
-        return nil, fmt.Errorf("received status code %d", resp.StatusCode)
-    }
-
-    feed, err := np.parser.Parse(resp.Body)
-    if err != nil {
-        return nil, fmt.Errorf("failed to parse feed: %v", err)
-    }
-
-    return feed, nil
+    return filtered
 }
 
-// processItems handles processing feed items
-func (np *NewsProcessor) processItems(ctx context.Context, source Source, feed *gofeed.Feed) error {
-    if feed == nil || len(feed.Items) == 0 {
-        return nil
-    }
+// postArticles posts articles to Discord channels
+func (np *NewsProcessor) postArticles(s *discordgo.Session, articles []*NewsArticle) error {
+    for _, guild := range cfg.Guilds {
+        guildConfig, err := LoadGuildConfig(guild.ID)
+        if err != nil {
+            Logger().Printf("Error loading config for guild %s: %v", guild.ID, err)
+            continue
+        }
 
-    // Get most recent items up to configured limit
-    itemLimit := cfg.MaxPostsPerSource
-    if itemLimit > len(feed.Items) {
-        itemLimit = len(feed.Items)
-    }
+        // Group articles by category
+        categoryArticles := groupArticlesByCategory(articles)
 
-    recentItems := feed.Items[:itemLimit]
-
-    // Process each item
-    for _, item := range recentItems {
-        select {
-        case <-ctx.Done():
-            return ctx.Err()
-        default:
-            if err := processNewsItem(ctx, source, item); err != nil {
-                Logger().Printf("Error processing item from %s: %v", source.Name, err)
+        // Post to appropriate channels
+        for category, catArticles := range categoryArticles {
+            channelID := getChannelForCategory(guildConfig, category)
+            if channelID == "" {
                 continue
+            }
+
+            for _, article := range catArticles {
+                embed := createNewsEmbed(article)
+                if _, err := s.ChannelMessageSendEmbed(channelID, embed); err != nil {
+                    Logger().Printf("Error posting article to channel %s: %v", channelID, err)
+                }
             }
         }
     }
@@ -218,44 +221,118 @@ func (np *NewsProcessor) processItems(ctx context.Context, source Source, feed *
     return nil
 }
 
-// updateSourceError updates error statistics for a source
-func updateSourceError(sourceName string, err error) {
-    sources := loadSources()
-    for i, src := range sources {
-        if src.Name == sourceName {
-            sources[i].LastError = err.Error()
-            sources[i].LastErrorTime = time.Now()
-            sources[i].ErrorCount++
-            saveSources(sources)
-            break
+// Helper functions
+
+func filterActiveSources(sources []NewsSource) []NewsSource {
+    active := make([]NewsSource, 0)
+    for _, source := range sources {
+        if !source.Paused {
+            active = append(active, source)
         }
     }
+    return active
 }
 
-// Helper function to process individual news items
-func processNewsItem(ctx context.Context, source Source, item *gofeed.Item) error {
-    // Convert feed item to our Article type
-    article := Article{
-        Title:     item.Title,
-        Content:   item.Description,
-        URL:       item.Link,
-        Source:    source.Name,
-        Timestamp: *item.PublishedParsed,
+func convertFeedItemToArticle(item *gofeed.Item, source NewsSource) *NewsArticle {
+    publishedAt := time.Now()
+    if item.PublishedParsed != nil {
+        publishedAt = *item.PublishedParsed
     }
 
-    // Perform content analysis if enabled
-    if cfg.EnableFactCheck || cfg.EnableSummarization {
-        if err := analyzeContent(ctx, &article); err != nil {
-            Logger().Printf("Content analysis failed for %s: %v", article.Title, err)
+    article := &NewsArticle{
+        ID:          generateArticleID(item),
+        Title:       item.Title,
+        URL:         item.Link,
+        Source:      source.Name,
+        PublishedAt: publishedAt,
+        FetchedAt:   time.Now(),
+        Summary:     item.Description,
+        Category:    source.Category,
+        Tags:        item.Categories,
+    }
+
+    if item.Image != nil {
+        article.ImageURL = item.Image.URL
+    }
+
+    return article
+}
+
+func createNewsEmbed(article *NewsArticle) *discordgo.MessageEmbed {
+    embed := &discordgo.MessageEmbed{
+        Title:       article.Title,
+        URL:         article.URL,
+        Description: truncateString(article.Summary, MaxEmbedLength),
+        Timestamp:   article.PublishedAt.Format(time.RFC3339),
+        Color:       getCategoryColor(article.Category),
+        Footer: &discordgo.MessageEmbedFooter{
+            Text: fmt.Sprintf("Source: %s", article.Source),
+        },
+    }
+
+    if article.ImageURL != "" {
+        embed.Image = &discordgo.MessageEmbedImage{
+            URL: article.ImageURL,
         }
     }
 
-    // Store article if database is enabled
-    if cfg.EnableDatabase {
-        if err := storeArticle(&article); err != nil {
-            return fmt.Errorf("failed to store article: %v", err)
-        }
+    if len(article.Tags) > 0 {
+        embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
+            Name:   "Tags",
+            Value:  strings.Join(article.Tags, ", "),
+            Inline: true,
+        })
     }
 
-    return nil
+    return embed
+}
+
+func generateArticleID(item *gofeed.Item) string {
+    if item.GUID != "" {
+        return item.GUID
+    }
+    return fmt.Sprintf("%s-%s", normalizeTitle(item.Title), time.Now().Format("20060102"))
+}
+
+func normalizeTitle(title string) string {
+    return strings.ToLower(strings.Join(strings.Fields(title), " "))
+}
+
+func groupArticlesByCategory(articles []*NewsArticle) map[string][]*NewsArticle {
+    grouped := make(map[string][]*NewsArticle)
+    for _, article := range articles {
+        grouped[article.Category] = append(grouped[article.Category], article)
+    }
+    return grouped
+}
+
+func getChannelForCategory(config *GuildConfig, category string) string {
+    if channelID := config.CategoryChannels[category]; channelID != "" {
+        return channelID
+    }
+    return config.NewsChannel // fallback to default channel
+}
+
+func truncateString(s string, maxLen int) string {
+    if len(s) <= maxLen {
+        return s
+    }
+    return s[:maxLen-3] + "..."
+}
+
+func getCategoryColor(category string) int {
+    colors := map[string]int{
+        CategoryTechnology: 0x7289DA,
+        CategoryBusiness:  0x43B581,
+        CategoryScience:   0xFAA61A,
+        CategoryHealth:    0xF04747,
+        CategoryPolitics:  0x747F8D,
+        CategorySports:    0x2ECC71,
+        CategoryWorld:     0x99AAB5,
+    }
+
+    if color, ok := colors[category]; ok {
+        return color
+    }
+    return 0x99AAB5 // default color
 }
