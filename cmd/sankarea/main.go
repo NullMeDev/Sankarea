@@ -17,25 +17,34 @@ import (
 
 var (
     // Global variables
-    cfg          *Config
-    state        *State
-    mutex        sync.RWMutex
-    db           *sql.DB
-    errorBuffer  *ErrorBuffer
+    cfg           *Config
+    db            *sql.DB
+    errorBuffer   *ErrorBuffer
     healthMonitor *HealthMonitor
+    dashboard     *DashboardServer
+    botVersion    = "1.0.0" // This should be updated with your actual version
 )
 
 func main() {
+    startTime := time.Now()
+
     // Parse command line flags
     configFile := flag.String("config", "config/config.json", "path to config file")
     sourcesFile := flag.String("sources", "config/sources.yml", "path to sources file")
+    logLevel := flag.String("log-level", "info", "logging level (debug, info, warn, error)")
     flag.Parse()
 
-    // Initialize logging
-    Logger().Printf("Starting Sankarea News Bot v%s", cfg.Version)
+    // Initialize logging first
+    if err := InitializeLogging(*logLevel); err != nil {
+        fmt.Printf("Failed to initialize logging: %v\n", err)
+        os.Exit(1)
+    }
+
+    Logger().Printf("Starting Sankarea News Bot v%s", botVersion)
+    Logger().Printf("Started by %s at %s UTC", "NullMeDev", startTime.Format("2006-01-02 15:04:05"))
 
     // Load configuration
-    if err := loadConfiguration(); err != nil {
+    if err := loadConfiguration(*configFile); err != nil {
         Logger().Printf("Failed to load configuration: %v", err)
         os.Exit(1)
     }
@@ -50,31 +59,23 @@ func main() {
     errorBuffer = NewErrorBuffer(100)
 
     // Initialize state
-    var err error
-    state, err = LoadState()
-    if err != nil {
-        Logger().Printf("Failed to load state: %v", err)
+    if err := InitializeState(); err != nil {
+        Logger().Printf("Failed to initialize state: %v", err)
         os.Exit(1)
     }
-
-    // Update startup time
-    state.StartupTime = time.Now()
-    state.Version = cfg.Version
 
     // Initialize health monitor
     healthMonitor = NewHealthMonitor()
     healthMonitor.StartPeriodicChecks(1 * time.Minute)
+    defer healthMonitor.StopChecks()
 
     // Create Discord session
-    discord, err := discordgo.New("Bot " + cfg.BotToken)
+    discord, err := initializeDiscord()
     if err != nil {
         Logger().Printf("Error creating Discord session: %v", err)
         os.Exit(1)
     }
-
-    // Register event handlers
-    discord.AddHandler(messageCreate)
-    discord.AddHandler(interactionCreate)
+    defer discord.Close()
 
     // Initialize database if enabled
     if cfg.EnableDatabase {
@@ -85,20 +86,18 @@ func main() {
         defer db.Close()
     }
 
-    // Open Discord connection
-    if err := discord.Open(); err != nil {
-        Logger().Printf("Error opening Discord connection: %v", err)
-        os.Exit(1)
-    }
-    defer discord.Close()
-
     // Start dashboard if enabled
     if cfg.EnableDashboard {
-        if err := StartDashboard(); err != nil {
+        if err := initializeDashboard(); err != nil {
             Logger().Printf("Failed to start dashboard: %v", err)
             os.Exit(1)
         }
     }
+
+    // Initialize scheduler
+    scheduler := NewScheduler()
+    scheduler.Start()
+    defer scheduler.Stop()
 
     // Register commands
     if err := registerCommands(discord); err != nil {
@@ -106,7 +105,7 @@ func main() {
         os.Exit(1)
     }
 
-    // Initialize news fetching
+    // Initial news fetch if configured
     if cfg.FetchNewsOnStartup {
         go func() {
             if err := fetchNews(discord); err != nil {
@@ -115,114 +114,131 @@ func main() {
         }()
     }
 
-    // Start news scheduler
-    scheduler := NewScheduler()
-    scheduler.Start()
+    // Log startup completion
+    Logger().Printf("Startup completed in %s", time.Since(startTime))
+    Logger().Printf("Bot is now running. Press CTRL-C to exit.")
 
     // Wait for shutdown signal
-    Logger().Printf("Bot is now running. Press CTRL-C to exit.")
-    sc := make(chan os.Signal, 1)
-    signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt)
-    <-sc
+    shutdownChan := make(chan os.Signal, 1)
+    signal.Notify(shutdownChan, syscall.SIGINT, syscall.SIGTERM, os.Interrupt)
+    <-shutdownChan
 
     // Graceful shutdown
-    Logger().Println("Shutting down...")
+    ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+    defer cancel()
+
+    Logger().Println("Initiating graceful shutdown...")
     
-    // Stop scheduler
-    scheduler.Stop()
-
-    // Stop health monitor
-    healthMonitor.StopChecks()
-
-    // Update shutdown time
-    state.ShutdownTime = time.Now()
-    if err := SaveState(state); err != nil {
-        Logger().Printf("Failed to save state during shutdown: %v", err)
+    // Begin shutdown sequence
+    if err := performGracefulShutdown(ctx, discord); err != nil {
+        Logger().Printf("Error during shutdown: %v", err)
     }
 
     Logger().Println("Shutdown complete")
 }
 
-func loadConfiguration() error {
-    // Load environment configuration
-    cfg = LoadEnvConfig()
-    
-    // Validate configuration
-    if err := ValidateEnvConfig(cfg); err != nil {
-        return fmt.Errorf("invalid configuration: %w", err)
+func initializeDiscord() (*discordgo.Session, error) {
+    discord, err := discordgo.New("Bot " + cfg.BotToken)
+    if err != nil {
+        return nil, fmt.Errorf("error creating Discord session: %v", err)
     }
 
-    return nil
+    // Register event handlers
+    discord.AddHandler(messageCreate)
+    discord.AddHandler(interactionCreate)
+    discord.AddHandler(ready)
+
+    // Open Discord connection
+    if err := discord.Open(); err != nil {
+        return nil, fmt.Errorf("error opening Discord connection: %v", err)
+    }
+
+    return discord, nil
 }
 
-func initializeDatabase() error {
-    // Database initialization code would go here
-    return nil
+func initializeDashboard() error {
+    dashboard = NewDashboardServer()
+    if err := dashboard.Initialize(); err != nil {
+        return fmt.Errorf("failed to initialize dashboard: %v", err)
+    }
+    return dashboard.Start()
 }
 
-func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
-    // Ignore messages from the bot itself
-    if m.Author.ID == s.State.User.ID {
-        return
+func InitializeState() error {
+    var err error
+    state, err = LoadState()
+    if err != nil {
+        return fmt.Errorf("failed to load state: %v", err)
     }
 
-    // Handle direct messages
-    if m.GuildID == "" {
-        handleDirectMessage(s, m)
-        return
-    }
-
-    // Handle guild messages if needed
+    // Update startup information
+    return UpdateState(func(s *State) {
+        s.StartupTime = time.Now()
+        s.Version = botVersion
+        s.ErrorCount = 0
+        s.LastInterval = cfg.NewsIntervalMinutes
+    })
 }
 
-func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
-    // Check if user has permission to use commands
-    if !CheckCommandPermissions(s, i) {
-        respondWithError(s, i, "You don't have permission to use this command")
-        return
+func performGracefulShutdown(ctx context.Context, discord *discordgo.Session) error {
+    // Update shutdown time
+    if err := UpdateState(func(s *State) {
+        s.ShutdownTime = time.Now()
+    }); err != nil {
+        Logger().Printf("Failed to update shutdown time: %v", err)
     }
 
-    // Handle different interaction types
-    switch i.Type {
-    case discordgo.InteractionApplicationCommand:
-        handleSlashCommand(s, i)
-    case discordgo.InteractionMessageComponent:
-        handleMessageComponent(s, i)
+    // Cleanup tasks
+    var wg sync.WaitGroup
+    errChan := make(chan error, 3)
+
+    // Close Discord connection
+    wg.Add(1)
+    go func() {
+        defer wg.Done()
+        if err := discord.Close(); err != nil {
+            errChan <- fmt.Errorf("discord shutdown error: %v", err)
+        }
+    }()
+
+    // Close database if enabled
+    if cfg.EnableDatabase && db != nil {
+        wg.Add(1)
+        go func() {
+            defer wg.Done()
+            if err := db.Close(); err != nil {
+                errChan <- fmt.Errorf("database shutdown error: %v", err)
+            }
+        }()
+    }
+
+    // Save final state
+    wg.Add(1)
+    go func() {
+        defer wg.Done()
+        if err := SaveState(state); err != nil {
+            errChan <- fmt.Errorf("state save error: %v", err)
+        }
+    }()
+
+    // Wait for all cleanup tasks or context timeout
+    done := make(chan struct{})
+    go func() {
+        wg.Wait()
+        close(done)
+    }()
+
+    select {
+    case <-ctx.Done():
+        return fmt.Errorf("shutdown timed out")
+    case err := <-errChan:
+        return err
+    case <-done:
+        return nil
     }
 }
 
-func handleSlashCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
-    // Get command data
-    data := i.ApplicationCommandData()
-
-    // Route to appropriate handler
-    switch data.Name {
-    case "ping":
-        handlePingCommand(s, i)
-    case "status":
-        handleStatusCommand(s, i)
-    case "source":
-        handleSourceCommand(s, i)
-    case "admin":
-        handleAdminCommand(s, i)
-    default:
-        respondWithError(s, i, "Unknown command")
-    }
-}
-
-func handleMessageComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
-    // Handle button clicks and select menus
-    data := i.MessageComponentData()
-    
-    // Route to appropriate handler based on custom ID
-    switch data.CustomID {
-    // Add handlers for different component IDs
-    default:
-        respondWithError(s, i, "Unknown component interaction")
-    }
-}
-
-func handleDirectMessage(s *discordgo.Session, m *discordgo.MessageCreate) {
-    // Handle direct messages to the bot
-    // This could be used for user-specific settings or help commands
+func ready(s *discordgo.Session, r *discordgo.Ready) {
+    Logger().Printf("Logged in as: %s#%s", s.State.User.Username, s.State.User.Discriminator)
+    s.UpdateGameStatus(0, fmt.Sprintf("v%s | /help", botVersion))
 }
