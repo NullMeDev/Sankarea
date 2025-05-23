@@ -42,20 +42,40 @@ func StartDashboard() error {
         return fmt.Errorf("failed to parse templates: %v", err)
     }
 
-    // Set up routes
-    http.HandleFunc("/", handleDashboardHome)
-    http.HandleFunc("/api/status", handleDashboardStatus)
-    http.HandleFunc("/api/sources", handleDashboardSources)
-    http.HandleFunc("/api/articles", handleDashboardArticles)
-    http.HandleFunc("/api/metrics", handleDashboardMetrics)
-    http.HandleFunc("/api/health", handleDashboardHealthCheck)
-    http.HandleFunc("/api/config", handleDashboardConfig)
+    // Create router and set up middleware
+    mux := http.NewServeMux()
+    
+    // Static file handler
+    mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(templateFS))))
+
+    // API routes
+    mux.HandleFunc("/api/status", handleDashboardStatus)
+    mux.HandleFunc("/api/sources", handleDashboardSources)
+    mux.HandleFunc("/api/articles", handleDashboardArticles)
+    mux.HandleFunc("/api/metrics", handleDashboardMetrics)
+    mux.HandleFunc("/api/health", handleDashboardHealthCheck)
+    mux.HandleFunc("/api/config", handleDashboardConfig)
+
+    // Page routes
+    mux.HandleFunc("/", handleDashboardHome)
+    mux.HandleFunc("/logs", handleDashboardLogs)
+    mux.HandleFunc("/sources", handleDashboardSourcesPage)
+    mux.HandleFunc("/articles", handleDashboardArticlesPage)
+    mux.HandleFunc("/settings", handleDashboardSettingsPage)
 
     // Start server
+    addr := fmt.Sprintf(":%d", cfg.DashboardPort)
+    server := &http.Server{
+        Addr:         addr,
+        Handler:      loggingMiddleware(mux),
+        ReadTimeout:  15 * time.Second,
+        WriteTimeout: 15 * time.Second,
+        IdleTimeout:  60 * time.Second,
+    }
+
     go func() {
-        addr := fmt.Sprintf(":%d", cfg.DashboardPort)
         Logger().Printf("Starting dashboard server on %s", addr)
-        if err := http.ListenAndServe(addr, nil); err != nil {
+        if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
             Logger().Printf("Dashboard server error: %v", err)
         }
     }()
@@ -63,24 +83,61 @@ func StartDashboard() error {
     return nil
 }
 
-// handleDashboardHome renders the main dashboard page
+func loggingMiddleware(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        start := time.Now()
+        next.ServeHTTP(w, r)
+        Logger().Printf("%s %s %s", r.Method, r.RequestURI, time.Since(start))
+    })
+}
+
 func handleDashboardHome(w http.ResponseWriter, r *http.Request) {
     dashboardMutex.RLock()
     defer dashboardMutex.RUnlock()
 
     data := getDashboardData()
-    
     if err := templates.ExecuteTemplate(w, "dashboard.html", data); err != nil {
         http.Error(w, fmt.Sprintf("Failed to render template: %v", err), http.StatusInternalServerError)
         return
     }
 }
 
-// handleDashboardStatus returns the current system status
+func handleDashboardLogs(w http.ResponseWriter, r *http.Request) {
+    data := getDashboardData()
+    if err := templates.ExecuteTemplate(w, "logs.html", data); err != nil {
+        http.Error(w, fmt.Sprintf("Failed to render template: %v", err), http.StatusInternalServerError)
+        return
+    }
+}
+
+func handleDashboardSourcesPage(w http.ResponseWriter, r *http.Request) {
+    data := getDashboardData()
+    if err := templates.ExecuteTemplate(w, "sources.html", data); err != nil {
+        http.Error(w, fmt.Sprintf("Failed to render template: %v", err), http.StatusInternalServerError)
+        return
+    }
+}
+
+func handleDashboardArticlesPage(w http.ResponseWriter, r *http.Request) {
+    data := getDashboardData()
+    if err := templates.ExecuteTemplate(w, "articles.html", data); err != nil {
+        http.Error(w, fmt.Sprintf("Failed to render template: %v", err), http.StatusInternalServerError)
+        return
+    }
+}
+
+func handleDashboardSettingsPage(w http.ResponseWriter, r *http.Request) {
+    data := getDashboardData()
+    if err := templates.ExecuteTemplate(w, "settings.html", data); err != nil {
+        http.Error(w, fmt.Sprintf("Failed to render template: %v", err), http.StatusInternalServerError)
+        return
+    }
+}
+
 func handleDashboardStatus(w http.ResponseWriter, r *http.Request) {
-    dashboardMutex.RLock()
+    mutex.RLock()
     currentState := *state
-    dashboardMutex.RUnlock()
+    mutex.RUnlock()
 
     status := map[string]interface{}{
         "version":      cfg.Version,
@@ -100,55 +157,35 @@ func handleDashboardStatus(w http.ResponseWriter, r *http.Request) {
     respondWithJSON(w, http.StatusOK, status)
 }
 
-// handleDashboardSources returns the list of news sources
 func handleDashboardSources(w http.ResponseWriter, r *http.Request) {
     sources := loadSources()
     respondWithJSON(w, http.StatusOK, sources)
 }
 
-// handleDashboardArticles returns recent articles
 func handleDashboardArticles(w http.ResponseWriter, r *http.Request) {
-    articles, err := getRecentArticles(20) // Get last 20 articles
+    articles, err := getRecentArticles(20)
     if err != nil {
-        respondWithError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to fetch articles: %v", err))
+        respondWithHTTPError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to fetch articles: %v", err))
         return
     }
     respondWithJSON(w, http.StatusOK, articles)
 }
 
-// handleDashboardMetrics returns system metrics
 func handleDashboardMetrics(w http.ResponseWriter, r *http.Request) {
     metrics := collectMetrics()
     respondWithJSON(w, http.StatusOK, metrics)
 }
 
-// handleDashboardHealthCheck returns detailed health status
 func handleDashboardHealthCheck(w http.ResponseWriter, r *http.Request) {
     health := GetHealthStatus()
     respondWithJSON(w, http.StatusOK, health)
 }
 
-// handleDashboardConfig returns sanitized configuration
 func handleDashboardConfig(w http.ResponseWriter, r *http.Request) {
-    // Create a sanitized version of config (removing sensitive data)
-    safeConfig := map[string]interface{}{
-        "version":               cfg.Version,
-        "newsIntervalMinutes":   cfg.NewsIntervalMinutes,
-        "maxPostsPerSource":     cfg.MaxPostsPerSource,
-        "enableImageEmbed":      cfg.EnableImageEmbed,
-        "enableFactCheck":       cfg.EnableFactCheck,
-        "enableSummarization":   cfg.EnableSummarization,
-        "enableContentFiltering": cfg.EnableContentFiltering,
-        "enableKeywordTracking": cfg.EnableKeywordTracking,
-        "enableDatabase":        cfg.EnableDatabase,
-        "enableDashboard":       cfg.EnableDashboard,
-        "fetchNewsOnStartup":    cfg.FetchNewsOnStartup,
-    }
-
+    safeConfig := getSafeConfig()
     respondWithJSON(w, http.StatusOK, safeConfig)
 }
 
-// getDashboardData collects all data needed for the dashboard
 func getDashboardData() DashboardData {
     mutex.RLock()
     currentState := *state
@@ -167,44 +204,6 @@ func getDashboardData() DashboardData {
     }
 }
 
-// getRecentArticlesDigest returns recent articles in digest format
-func getRecentArticlesDigest() []ArticleDigest {
-    articles, err := getRecentArticles(10)
-    if err != nil {
-        Logger().Printf("Failed to get recent articles: %v", err)
-        return []ArticleDigest{}
-    }
-    return articles
-}
-
-// getSystemStats returns various system statistics
-func getSystemStats() map[string]interface{} {
-    mutex.RLock()
-    currentState := *state
-    mutex.RUnlock()
-
-    return map[string]interface{}{
-        "totalArticles":   currentState.TotalArticles,
-        "totalErrors":     currentState.TotalErrors,
-        "totalAPICalls":   currentState.TotalAPICalls,
-        "feedCount":       currentState.FeedCount,
-        "digestCount":     currentState.DigestCount,
-        "errorCount":      currentState.ErrorCount,
-        "lastInterval":    currentState.LastInterval,
-        "lastFetchTime":   currentState.LastFetchTime,
-        "lastDigestTime":  currentState.LastDigest,
-    }
-}
-
-// getRecentErrors returns recent error events
-func getRecentErrors() []ErrorEvent {
-    healthMonitor.mutex.Lock()
-    defer healthMonitor.mutex.Unlock()
-
-    return append([]ErrorEvent{}, healthMonitor.errorLog...)
-}
-
-// getSafeConfig returns a sanitized version of the configuration
 func getSafeConfig() map[string]interface{} {
     return map[string]interface{}{
         "version":               cfg.Version,
