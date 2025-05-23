@@ -3,225 +3,109 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"gopkg.in/yaml.v2"
 )
 
+// Config file paths
 const (
-	configFilePath  = "config/config.json"
+	configFilePath = "config/config.json"
 	sourcesFilePath = "config/sources.yml"
-	stateFilePath   = "data/state.json"
-	VERSION         = "1.0.0"
 )
 
-// Source represents an RSS feed source
-type Source struct {
-	Name            string    `json:"name" yaml:"name"`
-	URL             string    `json:"url" yaml:"url"`
-	Paused          bool      `json:"paused" yaml:"paused"`
-	Active          bool      `json:"active" yaml:"active"`
-	LastDigest      time.Time `json:"lastDigest" yaml:"lastDigest"`
-	LastFetched     time.Time `json:"lastFetched" yaml:"lastFetched"`
-	LastInterval    int       `json:"lastInterval" yaml:"lastInterval"`
-	LastError       string    `json:"lastError" yaml:"lastError"`
-	LastErrorTime   time.Time `json:"lastErrorTime" yaml:"lastErrorTime"`
-	NewsNextTime    time.Time `json:"newsNextTime" yaml:"newsNextTime"`
-	FeedCount       int       `json:"feedCount" yaml:"feedCount"`
-	Lockdown        bool      `json:"lockdown" yaml:"lockdown"`
-	LockdownSetBy   string    `json:"lockdownSetBy" yaml:"lockdownSetBy"`
-	ErrorCount      int       `json:"errorCount" yaml:"errorCount"`
-	Category        string    `json:"category" yaml:"category"`
-	FactCheckAuto   bool      `json:"factCheckAuto" yaml:"factCheckAuto"`
-	SummarizeAuto   bool      `json:"summarizeAuto" yaml:"summarizeAuto"`
-	TrustScore      float64   `json:"trustScore" yaml:"trustScore"`
-	ChannelOverride string    `json:"channelOverride" yaml:"channelOverride"`
-	Bias            string    `json:"bias" yaml:"bias"`
-	Language        string    `json:"language" yaml:"language"`
-	UptimePercent   float64   `json:"uptimePercent" yaml:"uptimePercent"`
-	AvgResponseTime int64     `json:"avgResponseTime" yaml:"avgResponseTime"`
-}
-
-// Config holds application configuration
-type Config struct {
-	// Bot Configuration
-	BotToken             string          `json:"bot_token"`
-	AppID                string          `json:"app_id"`
-	GuildID              string          `json:"guild_id"`
-	Version              string          `json:"version"`
-	MaxPostsPerSource    int             `json:"maxPostsPerSource"`
-	OwnerIDs             []string        `json:"ownerIDs"` // Discord User IDs who have owner permissions
-	AdminRoleIDs         []string        `json:"adminRoleIDs"` // Discord Role IDs that have admin permissions
-	UserAgentString      string          `json:"user_agent_string"` // For HTTP requests
-	
-	// Channels Configuration
-	NewsChannelID        string          `json:"newsChannelId"`
-	DigestChannelID      string          `json:"digestChannelId"` // Can be same as NewsChannelID
-	AuditLogChannelID    string          `json:"auditLogChannelId"` 
-	ErrorChannelID       string          `json:"errorChannelId"`
-	Channels             []ChannelConfig `json:"channels"` // Additional channel configurations
-	
-	// Schedule Configuration
-	NewsIntervalMinutes  int             `json:"newsIntervalMinutes"` // Default: 120 (2 hours)
-	DigestCronSchedule   string          `json:"digestCronSchedule"`  // Default: "0 8 * * *" (8 AM daily)
-	News15MinCron        string          `json:"news15MinCron"`      // Cron schedule for news updates
-	
-	// API Keys and Integration
-	OpenAIAPIKey         string          `json:"openai_api_key"`
-	GoogleFactCheckAPIKey string         `json:"google_factcheck_api_key"`
-	ClaimBustersAPIKey   string          `json:"claimbuster_api_key"`
-	NewsAPIKey           string          `json:"newsapi_key"`
-	GNewsAPIKey          string          `json:"gnews_api_key"`
-	
-	// Feature Flags
-	EnableFactCheck      bool            `json:"enable_factcheck"`
-	EnableSummarization  bool            `json:"enable_summarization"`
-	EnableDatabase       bool            `json:"enable_database"`
-	EnableDashboard      bool            `json:"enable_dashboard"`
-	EnableMultiLanguage  bool            `json:"enable_multilanguage"`
-	EnableImageEmbed     bool            `json:"enable_image_embed"`
-	EnableKeywordTracking bool           `json:"enable_keyword_tracking"`
-	EnableAnalytics      bool            `json:"enable_analytics"`
-	FetchNewsOnStartup   bool            `json:"fetch_news_on_startup"`
-	
-	// Database Configuration
-	DatabaseURL          string          `json:"database_url"`
-	
-	// Health Monitoring
-	HealthAPIPort        int             `json:"health_api_port"`
-	EnableHealthMonitor  bool            `json:"enable_health_monitor"`
-	
-	// Rate Limiting
-	MaxAPIRequestsPerMinute int          `json:"max_api_requests_per_minute"`
-	MaxRequestsPerUser      int          `json:"max_requests_per_user"`
-	
-	// User Preferences
-	DefaultLanguage      string          `json:"default_language"`
-	SupportedLanguages   []string        `json:"supported_languages"`
-	DefaultDigestFormat  string          `json:"default_digest_format"`
-	
-	// Clustering & Analytics
-	TopicClusterThreshold float64        `json:"topic_cluster_threshold"`
-	EnableSentimentAnalysis bool         `json:"enable_sentiment_analysis"`
-	
-	// Error Recovery
-	MaxRetryCount        int             `json:"max_retry_count"`
-	RetryDelaySeconds    int             `json:"retry_delay_seconds"`
-}
-
-// ChannelConfig represents a Discord channel configuration
-type ChannelConfig struct {
-	ID         string   `json:"id"`
-	Name       string   `json:"name"`
-	Categories []string `json:"categories"`
-	Language   string   `json:"language"`
-}
-
-// LoadConfig loads the application configuration from file
+// LoadConfig loads the application configuration from disk
 func LoadConfig() (*Config, error) {
-	// Load default configuration if file doesn't exist
+	// Create config file if it doesn't exist
 	if _, err := os.Stat(configFilePath); os.IsNotExist(err) {
+		// Create default config
 		defaultConfig := &Config{
 			Version:             VERSION,
+			NewsIntervalMinutes: 15,
+			News15MinCron:       "*/15 * * * *",
 			MaxPostsPerSource:   5,
-			NewsIntervalMinutes: 120,
-			DigestCronSchedule:  "0 8 * * *", // 8 AM daily
-			News15MinCron:       "*/15 * * * *", // Every 15 minutes
-			EnableDashboard:     true,
-			MaxRetryCount:       3,
-			RetryDelaySeconds:   30,
-			DefaultLanguage:     "en",
-			SupportedLanguages:  []string{"en", "es", "fr", "de", "ja"},
-			DefaultDigestFormat: "compact",
-			EnableHealthMonitor: true,
+			EnableImageEmbed:    true,
+			UserAgentString:     "Sankarea RSS Bot v" + VERSION,
 			FetchNewsOnStartup:  true,
-			UserAgentString:     "Sankarea/1.0 RSS Reader Bot",
+			DigestCronSchedule:  "0 8 * * *",
+			DashboardPort:       8080,
 		}
 		
-		// Check for environment variables to override defaults
-		// Trim whitespace to avoid accidental issues
-		if token := strings.TrimSpace(os.Getenv("DISCORD_BOT_TOKEN")); token != "" {
-			defaultConfig.BotToken = token
-		}
-		
-		if appID := strings.TrimSpace(os.Getenv("DISCORD_APPLICATION_ID")); appID != "" {
-			defaultConfig.AppID = appID
-		}
-		
-		if guildID := strings.TrimSpace(os.Getenv("DISCORD_GUILD_ID")); guildID != "" {
-			defaultConfig.GuildID = guildID
-		}
-		
-		if channelID := strings.TrimSpace(os.Getenv("DISCORD_CHANNEL_ID")); channelID != "" {
-			defaultConfig.NewsChannelID = channelID
-			defaultConfig.DigestChannelID = channelID
-		}
-		
-		if openAIKey := strings.TrimSpace(os.Getenv("OPENAI_API_KEY")); openAIKey != "" {
-			defaultConfig.OpenAIAPIKey = openAIKey
-			defaultConfig.EnableSummarization = true
+		// Create directory if needed
+		if err := os.MkdirAll(filepath.Dir(configFilePath), 0755); err != nil {
+			return defaultConfig, err
 		}
 		
 		// Save default config
 		if err := SaveConfig(defaultConfig); err != nil {
-			return nil, err
+			return defaultConfig, err
 		}
 		
 		return defaultConfig, nil
 	}
 	
-	// Read config file
+	// Read existing config file
 	data, err := os.ReadFile(configFilePath)
 	if err != nil {
 		return nil, err
 	}
 	
+	// Parse config
 	var config Config
 	if err := json.Unmarshal(data, &config); err != nil {
 		return nil, err
 	}
 	
-	// Ensure version is set
+	// Load environment variables (overrides file settings)
+	config.BotToken = getEnvOrValue(config.BotToken, "DISCORD_BOT_TOKEN")
+	config.AppID = getEnvOrValue(config.AppID, "DISCORD_APPLICATION_ID")
+	config.GuildID = getEnvOrValue(config.GuildID, "DISCORD_GUILD_ID")
+	config.NewsChannelID = getEnvOrValue(config.NewsChannelID, "DISCORD_CHANNEL_ID")
+	
+	// If version is missing, set it
 	if config.Version == "" {
 		config.Version = VERSION
 	}
 	
-	// Set default user agent if not set
-	if config.UserAgentString == "" {
-		config.UserAgentString = "Sankarea/1.0 RSS Reader Bot"
+	// Enforce minimum values
+	if config.NewsIntervalMinutes < 5 {
+		config.NewsIntervalMinutes = 5
+	}
+	if config.MaxPostsPerSource < 1 {
+		config.MaxPostsPerSource = 5
 	}
 	
 	return &config, nil
 }
 
-// SaveConfig saves the configuration to file
-func SaveConfig(config *Config) error {
-	// Ensure config directory exists
-	if err := os.MkdirAll(filepath.Dir(configFilePath), 0755); err != nil {
-		return err
-	}
-	
+// SaveConfig saves the application configuration to disk
+func SaveConfig(cfg *Config) error {
 	// Marshal config to JSON
-	data, err := json.MarshalIndent(config, "", "  ")
+	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
 	}
 	
-	// Write to file atomically to prevent corruption
-	tempFile := configFilePath + ".tmp"
-	if err := os.WriteFile(tempFile, data, 0644); err != nil {
+	// Create directory if needed
+	if err := os.MkdirAll(filepath.Dir(configFilePath), 0755); err != nil {
 		return err
 	}
 	
-	// Then rename to the actual file (atomic operation on most file systems)
-	return os.Rename(tempFile, configFilePath)
+	// Save config
+	return os.WriteFile(configFilePath, data, 0644)
 }
 
-// LoadSources loads RSS feed sources from the sources.yml file
+// getEnvOrValue returns the environment variable value or the default value
+func getEnvOrValue(defaultValue, envKey string) string {
+	if value, exists := os.LookupEnv(envKey); exists && value != "" {
+		return value
+	}
+	return defaultValue
+}
+
+// LoadSources loads news sources from disk
 func LoadSources() ([]Source, error) {
 	// Check if file exists, create if not
 	if _, err := os.Stat(sourcesFilePath); os.IsNotExist(err) {
@@ -266,109 +150,94 @@ func LoadSources() ([]Source, error) {
 	return sources.Sources, nil
 }
 
-// SaveSources saves RSS feed sources to the sources.yml file
+// SaveSources saves news sources to disk
 func SaveSources(sources []Source) error {
-	// Ensure config directory exists
-	if err := os.MkdirAll(filepath.Dir(sourcesFilePath), 0755); err != nil {
-		return err
-	}
-	
-	// Wrap sources in a proper YAML structure
-	wrappedSources := struct {
+	// Create wrapper structure
+	wrapper := struct {
 		Sources []Source `yaml:"sources"`
 	}{
 		Sources: sources,
 	}
 	
-	// Marshal sources to YAML
-	data, err := yaml.Marshal(wrappedSources)
+	// Marshal to YAML
+	data, err := yaml.Marshal(wrapper)
 	if err != nil {
 		return err
 	}
 	
-	// Write to file atomically to prevent corruption
-	tempFile := sourcesFilePath + ".tmp"
-	if err := os.WriteFile(tempFile, data, 0644); err != nil {
+	// Create directory if needed
+	if err := os.MkdirAll(filepath.Dir(sourcesFilePath), 0755); err != nil {
 		return err
 	}
 	
-	// Then rename to the actual file (atomic operation on most file systems)
-	return os.Rename(tempFile, sourcesFilePath)
+	// Save file
+	return os.WriteFile(sourcesFilePath, data, 0644)
 }
 
-// ConfigManager watches for config changes and reloads when necessary
-type ConfigManager struct {
-	configPath    string
-	checkInterval time.Duration
-	lastModTime   time.Time
-	reloadHandler func(*Config)
-	stopChan      chan struct{}
-}
-
-// NewConfigManager creates a new config manager
-func NewConfigManager(configPath string, checkInterval time.Duration) (*ConfigManager, error) {
-	info, err := os.Stat(configPath)
+// AddOrUpdateSource adds a new source or updates an existing one
+func AddOrUpdateSource(source Source) error {
+	sources, err := LoadSources()
 	if err != nil {
-		return nil, err
+		return err
 	}
 	
-	return &ConfigManager{
-		configPath:    configPath,
-		checkInterval: checkInterval,
-		lastModTime:   info.ModTime(),
-		stopChan:      make(chan struct{}),
-	}, nil
-}
-
-// SetReloadHandler sets the function to call when config is reloaded
-func (m *ConfigManager) SetReloadHandler(handler func(*Config)) {
-	m.reloadHandler = handler
-}
-
-// StartWatching starts watching for config changes
-func (m *ConfigManager) StartWatching() {
-	go func() {
-		defer RecoverFromPanic("config-watcher")
-		
-		ticker := time.NewTicker(m.checkInterval)
-		defer ticker.Stop()
-		
-		for {
-			select {
-			case <-ticker.C:
-				m.checkForChanges()
-			case <-m.stopChan:
-				return
-			}
+	// Check if source already exists
+	found := false
+	for i, s := range sources {
+		if s.Name == source.Name {
+			sources[i] = source
+			found = true
+			break
 		}
-	}()
-}
-
-// Stop stops watching for config changes
-func (m *ConfigManager) Stop() {
-	close(m.stopChan)
-}
-
-// checkForChanges checks if the config file has changed
-func (m *ConfigManager) checkForChanges() {
-	info, err := os.Stat(m.configPath)
-	if err != nil {
-		Logger().Printf("Error checking config file: %v", err)
-		return
 	}
 	
-	if info.ModTime().After(m.lastModTime) {
-		Logger().Println("Config file changed, reloading...")
-		m.lastModTime = info.ModTime()
-		
-		config, err := LoadConfig()
-		if err != nil {
-			Logger().Printf("Error reloading config: %v", err)
-			return
-		}
-		
-		if m.reloadHandler != nil {
-			m.reloadHandler(config)
+	// Add new source if not found
+	if !found {
+		sources = append(sources, source)
+	}
+	
+	return SaveSources(sources)
+}
+
+// RemoveSource removes a source by name
+func RemoveSource(name string) error {
+	sources, err := LoadSources()
+	if err != nil {
+		return err
+	}
+	
+	// Find and remove source
+	for i, s := range sources {
+		if s.Name == name {
+			// Remove this source
+			sources = append(sources[:i], sources[i+1:]...)
+			break
 		}
 	}
+	
+	return SaveSources(sources)
+}
+
+// UpdateSourceStatus updates a source's paused status
+func UpdateSourceStatus(name string, paused bool) error {
+	sources, err := LoadSources()
+	if err != nil {
+		return err
+	}
+	
+	// Find and update source
+	found := false
+	for i, s := range sources {
+		if s.Name == name {
+			sources[i].Paused = paused
+			found = true
+			break
+		}
+	}
+	
+	if !found {
+		return fmt.Errorf("source %s not found", name)
+	}
+	
+	return SaveSources(sources)
 }
