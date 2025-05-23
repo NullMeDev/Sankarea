@@ -24,8 +24,6 @@ type HealthMonitor struct {
     errorLog        []ErrorEvent
 }
 
-var healthMonitor *HealthMonitor
-
 // NewHealthMonitor creates a new health monitor
 func NewHealthMonitor() *HealthMonitor {
     return &HealthMonitor{
@@ -34,31 +32,6 @@ func NewHealthMonitor() *HealthMonitor {
         },
         errorLog: make([]ErrorEvent, 0),
     }
-}
-
-// handleSystemHealthCheck handles system-level health checks
-func handleSystemHealthCheck(w http.ResponseWriter, r *http.Request) {
-    mutex.RLock()
-    currentState := *state
-    mutex.RUnlock()
-
-    metrics := collectMetrics()
-    
-    response := map[string]interface{}{
-        "status":        getStatusString(&currentState),
-        "version":       cfg.Version,
-        "uptime":       FormatDuration(time.Since(currentState.StartupTime)),
-        "lastCheck":     healthMonitor.lastCheck,
-        "metrics":       metrics,
-        "errorCount":    currentState.ErrorCount,
-        "feedCount":     currentState.FeedCount,
-        "lastError":     currentState.LastError,
-        "lastErrorTime": currentState.LastErrorTime,
-        "paused":       currentState.Paused,
-        "lockdown":     currentState.Lockdown,
-    }
-
-    respondWithJSON(w, http.StatusOK, response)
 }
 
 // StartPeriodicChecks begins periodic health checks
@@ -124,11 +97,19 @@ func (hm *HealthMonitor) PerformChecks() {
     } else {
         hm.healthyStreak = 0
         hm.unhealthyStreak++
-    }
 
-    // Alert if unhealthy streak is too long
-    if hm.unhealthyStreak >= 5 {
-        AuditLog(fmt.Sprintf("System has been unhealthy for %d consecutive checks", hm.unhealthyStreak))
+        // Alert if unhealthy streak is too long
+        if hm.unhealthyStreak >= 5 {
+            AuditLog(fmt.Sprintf("System has been unhealthy for %d consecutive checks", hm.unhealthyStreak))
+            
+            // Send alert to error channel if configured
+            if cfg.ErrorChannelID != "" {
+                msg := fmt.Sprintf("⚠️ System Health Alert: Unhealthy for %d consecutive checks", hm.unhealthyStreak)
+                if err := sendErrorChannelMessage(msg); err != nil {
+                    Logger().Printf("Failed to send health alert: %v", err)
+                }
+            }
+        }
     }
 }
 
@@ -146,6 +127,13 @@ func (hm *HealthMonitor) logError(message, severity string) {
         // Keep only the last 100 errors
         hm.errorLog = hm.errorLog[len(hm.errorLog)-100:]
     }
+
+    // Update state error count
+    mutex.Lock()
+    state.ErrorCount++
+    state.LastError = message
+    state.LastErrorTime = event.Time
+    mutex.Unlock()
 
     // Log to system logger
     Logger().Printf("[%s] %s", severity, message)
@@ -181,28 +169,6 @@ func (hm *HealthMonitor) cleanupOldLogs() {
     }
 }
 
-// getStatusString returns the current system status
-func getStatusString(state *State) string {
-    if state.Lockdown {
-        return "lockdown"
-    }
-    if state.Paused {
-        return "paused"
-    }
-    if state.ErrorCount > 0 {
-        return "warning"
-    }
-    return "healthy"
-}
-
-// checkDatabaseHealth verifies database connectivity
-func checkDatabaseHealth() error {
-    if db == nil {
-        return fmt.Errorf("database not initialized")
-    }
-    return db.Ping()
-}
-
 // GetHealthStatus returns the current health status
 func GetHealthStatus() map[string]interface{} {
     mutex.RLock()
@@ -225,13 +191,35 @@ func GetHealthStatus() map[string]interface{} {
     }
 }
 
-// ResetHealthMonitor resets the health monitor state
-func ResetHealthMonitor() {
-    healthMonitor.mutex.Lock()
-    defer healthMonitor.mutex.Unlock()
+// getStatusString returns the current system status
+func getStatusString(state *State) string {
+    if state.Lockdown {
+        return "lockdown"
+    }
+    if state.Paused {
+        return "paused"
+    }
+    if state.ErrorCount > 0 {
+        return "warning"
+    }
+    return "healthy"
+}
 
-    healthMonitor.errorLog = make([]ErrorEvent, 0)
-    healthMonitor.healthyStreak = 0
-    healthMonitor.unhealthyStreak = 0
-    healthMonitor.lastCheck = time.Now()
+// checkDatabaseHealth verifies database connectivity
+func checkDatabaseHealth() error {
+    if db == nil {
+        return fmt.Errorf("database not initialized")
+    }
+    return db.Ping()
+}
+
+// sendErrorChannelMessage sends a message to the error channel
+func sendErrorChannelMessage(message string) error {
+    if cfg.ErrorChannelID == "" {
+        return fmt.Errorf("error channel ID not configured")
+    }
+    
+    // This function would use the Discord session to send the message
+    // The actual implementation would depend on how the Discord session is managed
+    return nil
 }
