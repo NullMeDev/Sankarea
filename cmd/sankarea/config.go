@@ -6,6 +6,7 @@ import (
     "fmt"
     "os"
     "path/filepath"
+    "time"
 )
 
 // Config represents the bot's configuration
@@ -19,23 +20,42 @@ type Config struct {
     DatabasePath string `json:"database_path"`
 
     // News fetching configuration
-    FetchInterval   int    `json:"fetch_interval"`   // in minutes
-    MaxPostsPerRun  int    `json:"max_posts_per_run"`
-    SourcesPath     string `json:"sources_path"`
-    CachePath       string `json:"cache_path"`
+    FetchInterval   int      `json:"fetch_interval"`   // in minutes
+    MaxPostsPerRun  int      `json:"max_posts_per_run"`
+    SourcesPath     string   `json:"sources_path"`
+    CachePath       string   `json:"cache_path"`
+    Categories      []string `json:"categories"`
 
     // Fact checking configuration
     EnableFactCheck bool    `json:"enable_fact_check"`
     FactCheckAPI    string `json:"fact_check_api,omitempty"`
+    FactCheckKey    string `json:"fact_check_key,omitempty"`
 
     // Dashboard configuration
     DashboardEnabled bool   `json:"dashboard_enabled"`
     DashboardPort   int    `json:"dashboard_port,omitempty"`
     DashboardHost   string `json:"dashboard_host,omitempty"`
+
+    // Logging configuration
+    LogPath      string `json:"log_path"`
+    LogLevel     string `json:"log_level"`
+    LogToConsole bool   `json:"log_to_console"`
+
+    // Runtime configuration
+    StartTime time.Time `json:"-"` // Not stored in JSON
 }
 
 var (
     cfg *Config
+    DefaultCategories = []string{
+        "Technology",
+        "Business",
+        "Science",
+        "Health",
+        "Politics",
+        "Sports",
+        "World",
+    }
 )
 
 // LoadConfig loads the configuration from the specified file
@@ -66,6 +86,14 @@ func LoadConfig(path string) (*Config, error) {
     // Set default values if not specified
     setDefaults(config)
 
+    // Set runtime values
+    config.StartTime = time.Now()
+
+    // Create necessary directories
+    if err := createDirectories(config); err != nil {
+        return nil, err
+    }
+
     cfg = config
     return config, nil
 }
@@ -84,6 +112,9 @@ func validateConfig(c *Config) error {
     if c.SourcesPath == "" {
         return fmt.Errorf("sources path is required")
     }
+    if c.EnableFactCheck && c.FactCheckAPI == "" {
+        return fmt.Errorf("fact check API is required when fact checking is enabled")
+    }
     return nil
 }
 
@@ -98,12 +129,39 @@ func setDefaults(c *Config) {
     if c.CachePath == "" {
         c.CachePath = "cache"
     }
+    if c.LogPath == "" {
+        c.LogPath = "logs"
+    }
+    if c.LogLevel == "" {
+        c.LogLevel = "info"
+    }
+    if c.Categories == nil || len(c.Categories) == 0 {
+        c.Categories = DefaultCategories
+    }
     if c.DashboardPort <= 0 {
         c.DashboardPort = 8080
     }
     if c.DashboardHost == "" {
         c.DashboardHost = "localhost"
     }
+}
+
+// createDirectories ensures all necessary directories exist
+func createDirectories(c *Config) error {
+    dirs := []string{
+        filepath.Dir(c.DatabasePath),
+        filepath.Dir(c.SourcesPath),
+        c.CachePath,
+        c.LogPath,
+    }
+
+    for _, dir := range dirs {
+        if err := os.MkdirAll(dir, 0755); err != nil {
+            return fmt.Errorf("failed to create directory %s: %v", dir, err)
+        }
+    }
+
+    return nil
 }
 
 // SaveConfig saves the current configuration to file
@@ -127,4 +185,9 @@ func SaveConfig(path string) error {
 // GetConfig returns the current configuration
 func GetConfig() *Config {
     return cfg
+}
+
+// GetUptime returns the duration since the bot started
+func (c *Config) GetUptime() time.Duration {
+    return time.Since(c.StartTime)
 }
