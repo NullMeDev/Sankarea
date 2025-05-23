@@ -1,1 +1,35 @@
+# Configuration and data files
+cmd/sankarea/config.json
+cmd/sankarea/data/
+cmd/sankarea/logs/
+cmd/sankarea/cache/
 
+# Environment variables
+.env
+
+# Binary files
+cmd/sankarea/sankarea
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# IDE specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS specific files
+.DS_Store
+Thumbs.db
+
+# Go specific
+vendor/
