@@ -208,3 +208,244 @@ func (b *Bot) handleDigestCommand(s *discordgo.Session, i *discordgo.Interaction
 func (b *Bot) GetUptime() time.Duration {
     return time.Since(b.startTime)
 }
+
+// Discord event handlers
+
+// handleReady handles the ready event when the bot connects to Discord
+func (b *Bot) handleReady(s *discordgo.Session, r *discordgo.Ready) {
+    b.logger.Info("Bot is ready! Logged in as %s#%s", s.State.User.Username, s.State.User.Discriminator)
+    
+    // Set custom status
+    err := s.UpdateGameStatus(0, "Monitoring news feeds")
+    if err != nil {
+        b.logger.Error("Failed to set status: %v", err)
+    }
+}
+
+// handleMessageCreate handles new message events
+func (b *Bot) handleMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
+    // Ignore messages from the bot itself
+    if m.Author.ID == s.State.User.ID {
+        return
+    }
+
+    // Check if message starts with command prefix
+    if !strings.HasPrefix(m.Content, "!") {
+        return
+    }
+
+    // Split message into command and arguments
+    args := strings.Fields(m.Content)
+    if len(args) == 0 {
+        return
+    }
+
+    // Extract command
+    cmd := strings.ToLower(strings.TrimPrefix(args[0], "!"))
+
+    // Handle commands
+    switch cmd {
+    case "sources":
+        b.handleSourcesCommand(s, m)
+    case "status":
+        b.handleStatusCommand(s, m)
+    case "help":
+        b.handleHelpCommand(s, m)
+    case "refresh":
+        // Only allow owner to use refresh command
+        if m.Author.ID == b.config.OwnerID {
+            b.handleRefreshCommand(s, m)
+        }
+    }
+}
+
+// handleInteractionCreate handles slash command interactions
+func (b *Bot) handleInteractionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
+    // Handle different interaction types
+    switch i.Type {
+    case discordgo.InteractionApplicationCommand:
+        b.handleSlashCommand(s, i)
+    case discordgo.InteractionMessageComponent:
+        b.handleMessageComponent(s, i)
+    }
+}
+
+// Command handlers
+
+func (b *Bot) handleSourcesCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
+    // Create categories map
+    categories := make(map[string][]string)
+    
+    // Group sources by category
+    for _, source := range b.scheduler.GetSources() {
+        categories[source.Category] = append(categories[source.Category], source.Name)
+    }
+
+    // Create embed
+    embed := &discordgo.MessageEmbed{
+        Title: "Available News Sources",
+        Color: 0x7289DA,
+        Fields: []*discordgo.MessageEmbedField{},
+    }
+
+    // Add fields for each category
+    for category, sources := range categories {
+        // Sort sources alphabetically
+        sort.Strings(sources)
+        
+        embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
+            Name:   category,
+            Value:  strings.Join(sources, "\n"),
+            Inline: false,
+        })
+    }
+
+    // Send embed
+    _, err := s.ChannelMessageSendEmbed(m.ChannelID, embed)
+    if err != nil {
+        b.logger.Error("Failed to send sources list: %v", err)
+    }
+}
+
+func (b *Bot) handleStatusCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
+    // Get bot statistics
+    stats := b.scheduler.GetStats()
+    uptime := time.Since(b.startTime).Round(time.Second)
+
+    // Create embed
+    embed := &discordgo.MessageEmbed{
+        Title: "Bot Status",
+        Color: 0x43B581,
+        Fields: []*discordgo.MessageEmbedField{
+            {
+                Name:   "Uptime",
+                Value:  uptime.String(),
+                Inline: true,
+            },
+            {
+                Name:   "Articles Fetched",
+                Value:  fmt.Sprintf("%d", stats.ArticleCount),
+                Inline: true,
+            },
+            {
+                Name:   "Active Sources",
+                Value:  fmt.Sprintf("%d", stats.ActiveSources),
+                Inline: true,
+            },
+            {
+                Name:   "Last Update",
+                Value:  stats.LastUpdate.Format("2006-01-02 15:04:05 MST"),
+                Inline: false,
+            },
+        },
+        Timestamp: time.Now().Format(time.RFC3339),
+    }
+
+    // Add error information if there are any
+    if stats.LastError != "" {
+        embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
+            Name:   "Last Error",
+            Value:  stats.LastError,
+            Inline: false,
+        })
+        embed.Color = 0xF04747 // Red color for error state
+    }
+
+    // Send embed
+    _, err := s.ChannelMessageSendEmbed(m.ChannelID, embed)
+    if err != nil {
+        b.logger.Error("Failed to send status: %v", err)
+    }
+}
+
+func (b *Bot) handleHelpCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
+    embed := &discordgo.MessageEmbed{
+        Title: "Sankarea Bot Commands",
+        Color: 0x7289DA,
+        Fields: []*discordgo.MessageEmbedField{
+            {
+                Name:   "!sources",
+                Value:  "List all available news sources by category",
+                Inline: false,
+            },
+            {
+                Name:   "!status",
+                Value:  "Show bot status and statistics",
+                Inline: false,
+            },
+            {
+                Name:   "!help",
+                Value:  "Show this help message",
+                Inline: false,
+            },
+        },
+    }
+
+    // Add owner-only commands if message author is owner
+    if m.Author.ID == b.config.OwnerID {
+        embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
+            Name:   "!refresh",
+            Value:  "Force refresh of all news feeds (Owner only)",
+            Inline: false,
+        })
+    }
+
+    _, err := s.ChannelMessageSendEmbed(m.ChannelID, embed)
+    if err != nil {
+        b.logger.Error("Failed to send help message: %v", err)
+    }
+}
+
+func (b *Bot) handleRefreshCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
+    // Send acknowledgment
+    msg, err := s.ChannelMessageSend(m.ChannelID, "🔄 Refreshing news feeds...")
+    if err != nil {
+        b.logger.Error("Failed to send refresh acknowledgment: %v", err)
+        return
+    }
+
+    // Trigger refresh
+    err = b.scheduler.RefreshNow()
+    if err != nil {
+        _, _ = s.ChannelMessageEdit(m.ChannelID, msg.ID, "❌ Failed to refresh feeds: "+err.Error())
+        return
+    }
+
+    // Update message with success
+    _, err = s.ChannelMessageEdit(m.ChannelID, msg.ID, "✅ News feeds refreshed successfully!")
+    if err != nil {
+        b.logger.Error("Failed to update refresh message: %v", err)
+    }
+}
+
+func (b *Bot) handleSlashCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
+    // Get command name
+    cmd := i.ApplicationCommandData().Name
+
+    // Handle different commands
+    switch cmd {
+    case "sources":
+        b.handleSourcesSlashCommand(s, i)
+    case "status":
+        b.handleStatusSlashCommand(s, i)
+    default:
+        s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+            Type: discordgo.InteractionResponseChannelMessageWithSource,
+            Data: &discordgo.InteractionResponseData{
+                Content: "Unknown command",
+            },
+        })
+    }
+}
+
+func (b *Bot) handleMessageComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
+    // Handle button clicks or select menus
+    // This can be expanded later if needed
+    s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+        Type: discordgo.InteractionResponseChannelMessageWithSource,
+        Data: &discordgo.InteractionResponseData{
+            Content: "Action acknowledged",
+            Flags:   discordgo.MessageFlagsEphemeral,
+        },
+    })
+}
