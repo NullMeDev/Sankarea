@@ -2,6 +2,7 @@
 package main
 
 import (
+    "fmt"
     "os"
     "strconv"
     "strings"
@@ -101,6 +102,24 @@ func ValidateEnvConfig(cfg *Config) error {
     if len(cfg.OwnerIDs) == 0 {
         return fmt.Errorf("at least one OWNER_ID is required")
     }
+
+    // Validate other critical configuration
+    if cfg.NewsIntervalMinutes < 5 {
+        return fmt.Errorf("NEWS_INTERVAL_MINUTES must be at least 5")
+    }
+    if cfg.MaxPostsPerSource < 1 {
+        return fmt.Errorf("MAX_POSTS_PER_SOURCE must be at least 1")
+    }
+    if cfg.DashboardPort < 1024 || cfg.DashboardPort > 65535 {
+        return fmt.Errorf("DASHBOARD_PORT must be between 1024 and 65535")
+    }
+    if cfg.HealthAPIPort < 1024 || cfg.HealthAPIPort > 65535 {
+        return fmt.Errorf("HEALTH_API_PORT must be between 1024 and 65535")
+    }
+    if cfg.DashboardPort == cfg.HealthAPIPort {
+        return fmt.Errorf("DASHBOARD_PORT and HEALTH_API_PORT must be different")
+    }
+
     return nil
 }
 
