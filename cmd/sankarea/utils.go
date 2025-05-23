@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"html"
+	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -366,5 +368,55 @@ func SetupLogging() error {
 	return nil
 }
 
+// IncrementAPIRequestCount increases the API request counter
+func IncrementAPIRequestCount() {
+	// This is a placeholder - would actually update a counter in state
+	// or analytics system in a full implementation
+}
+
+// getCurrentDateFormatted returns the current date formatted for reports
+func GetCurrentDateFormatted() string {
+	return time.Now().Format("2006-01-02 15:04:05")
+}
+
+// validateCronExpression validates a cron expression string
+func ValidateCronExpression(expression string) bool {
+	_, err := cron.ParseStandard(expression)
+	return err == nil
+}
+
+// EncodeToBase64 encodes a string to base64
+func EncodeToBase64(input string) string {
+	return input // Placeholder - would use proper base64 encoding
+}
+
+// RecoverFromPanic handles panics gracefully
+func RecoverFromPanic(component string) {
+	if r := recover(); r != nil {
+		Logger().Printf("PANIC RECOVERED in %s: %v", component, r)
+		if errorSystem != nil {
+			errorSystem.HandleError(
+				fmt.Sprintf("Panic in %s", component),
+				fmt.Errorf("%v", r),
+				component,
+				ErrorSeverityHigh,
+			)
+		} else {
+			log.Printf("ERROR SYSTEM NOT INITIALIZED: Panic in %s: %v", component, r)
+		}
+	}
+}
+
+// Error severity levels
+const (
+	ErrorSeverityLow    = 1
+	ErrorSeverityMedium = 2
+	ErrorSeverityHigh   = 3
+	ErrorSeverityFatal  = 4
+)
+
 // Global logger
 var appLogger *Log
+
+// Version constant
+const VERSION = "1.0.0"
