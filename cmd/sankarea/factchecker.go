@@ -5,6 +5,7 @@ import (
     "context"
     "fmt"
     "net/http"
+    "regexp"
     "strings"
     "sync"
     "time"
@@ -20,10 +21,11 @@ type FactChecker struct {
 
 // FactCheckResult represents the result of a fact check
 type FactCheckResult struct {
-    Score          float64  `json:"score"`
-    ReliabilityTier string   `json:"reliability_tier"`
-    Claims         []Claim  `json:"claims,omitempty"`
-    Timestamp      time.Time `json:"timestamp"`
+    Score           float64   `json:"score"`
+    ReliabilityTier string    `json:"reliability_tier"`
+    Claims          []Claim   `json:"claims,omitempty"`
+    Reasons         []string  `json:"reasons,omitempty"` // Added from factcheck.go
+    Timestamp       time.Time `json:"timestamp"`
 }
 
 // Claim represents a verified claim in an article
@@ -32,6 +34,17 @@ type Claim struct {
     Rating   string `json:"rating"`
     Evidence string `json:"evidence,omitempty"`
 }
+
+const (
+    // Reliability tiers
+    TierHigh   = "High"
+    TierMedium = "Medium"
+    TierLow    = "Low"
+
+    // Score thresholds
+    ScoreHigh   = 0.8
+    ScoreMedium = 0.5
+)
 
 // NewFactChecker creates a new fact checker instance
 func NewFactChecker() *FactChecker {
@@ -52,7 +65,7 @@ func (fc *FactChecker) CheckArticle(ctx context.Context, article *NewsArticle) (
     }
 
     // Perform reliability analysis
-    score, err := fc.analyzeReliability(ctx, article)
+    score, reasons, err := fc.analyzeReliability(ctx, article)
     if err != nil {
         return nil, fmt.Errorf("reliability analysis failed: %v", err)
     }
@@ -69,10 +82,11 @@ func (fc *FactChecker) CheckArticle(ctx context.Context, article *NewsArticle) (
     tier := fc.determineReliabilityTier(score)
 
     result := &FactCheckResult{
-        Score:          score,
+        Score:           score,
         ReliabilityTier: tier,
-        Claims:         claims,
-        Timestamp:      time.Now(),
+        Claims:          claims,
+        Reasons:         reasons,
+        Timestamp:       time.Now(),
     }
 
     // Cache the result
@@ -82,21 +96,28 @@ func (fc *FactChecker) CheckArticle(ctx context.Context, article *NewsArticle) (
 }
 
 // analyzeReliability calculates a reliability score for an article
-func (fc *FactChecker) analyzeReliability(ctx context.Context, article *NewsArticle) (float64, error) {
-    // Initialize base score
+func (fc *FactChecker) analyzeReliability(ctx context.Context, article *NewsArticle) (float64, []string, error) {
+    var reasons []string
     score := 0.5
 
     // Check source reliability
-    sourceScore := fc.getSourceReliabilityScore(article.Source)
+    sourceScore, sourceReason := fc.getSourceReliabilityScore(article.Source)
+    if sourceReason != "" {
+        reasons = append(reasons, sourceReason)
+    }
     score = (score + sourceScore) / 2
 
     // Check content indicators
-    contentScore := fc.analyzeContent(article.Content)
+    contentScore, contentReasons := fc.analyzeContent(article.Content)
+    reasons = append(reasons, contentReasons...)
     score = (score + contentScore) / 2
 
     // Check external citations
     if len(article.Citations) > 0 {
-        citationScore := fc.analyzeCitations(article.Citations)
+        citationScore, citationReason := fc.analyzeCitations(article.Citations)
+        if citationReason != "" {
+            reasons = append(reasons, citationReason)
+        }
         score = (score + citationScore) / 2
     }
 
@@ -108,7 +129,7 @@ func (fc *FactChecker) analyzeReliability(ctx context.Context, article *NewsArti
         score = 1
     }
 
-    return score, nil
+    return score, reasons, nil
 }
 
 // extractClaims identifies and verifies major claims in the article
@@ -138,12 +159,12 @@ func (fc *FactChecker) extractClaims(ctx context.Context, article *NewsArticle) 
 // determineReliabilityTier converts a numerical score to a tier
 func (fc *FactChecker) determineReliabilityTier(score float64) string {
     switch {
-    case score >= 0.8:
-        return "High"
-    case score >= 0.5:
-        return "Medium"
+    case score >= ScoreHigh:
+        return TierHigh
+    case score >= ScoreMedium:
+        return TierMedium
     default:
-        return "Low"
+        return TierLow
     }
 }
 
@@ -171,36 +192,59 @@ func (fc *FactChecker) cacheResult(url string, result *FactCheckResult) {
 
 // Helper methods
 
-func (fc *FactChecker) getSourceReliabilityScore(source string) float64 {
-    // Implementation would include checking against a database of known reliable sources
-    // For now, return a neutral score
-    return 0.5
+func (fc *FactChecker) getSourceReliabilityScore(source string) (float64, string) {
+    reliableSources := map[string]bool{
+        "Reuters":     true,
+        "AP News":     true,
+        "BBC News":    true,
+        "Tech News":   true,
+        "World News":  true,
+        "Bloomberg":   true,
+        "Nature":      true,
+        "Science":     true,
+    }
+
+    if reliableSources[source] {
+        return 1.0, fmt.Sprintf("Source '%s' is known to be reliable", source)
+    }
+
+    return 0.5, fmt.Sprintf("Source '%s' reliability is uncertain", source)
 }
 
-func (fc *FactChecker) analyzeContent(content string) float64 {
+func (fc *FactChecker) analyzeContent(content string) (float64, []string) {
     score := 0.5
+    var reasons []string
 
     // Check for clickbait indicators
-    if fc.hasClickbaitPatterns(content) {
+    if hasClickbait := fc.hasClickbaitPatterns(content); hasClickbait {
         score -= 0.2
+        reasons = append(reasons, "Contains clickbait patterns")
     }
 
     // Check for emotional manipulation
-    if fc.hasEmotionalManipulation(content) {
+    if hasEmotional := fc.hasEmotionalManipulation(content); hasEmotional {
         score -= 0.1
+        reasons = append(reasons, "Contains emotional manipulation")
     }
 
     // Check for balanced reporting
-    if fc.hasBalancedPerspectives(content) {
+    if hasBalanced := fc.hasBalancedPerspectives(content); hasBalanced {
         score += 0.2
+        reasons = append(reasons, "Shows balanced perspectives")
     }
 
-    return score
+    // Check for excessive punctuation
+    if hasExcessive := fc.hasExcessivePunctuation(content); hasExcessive {
+        score -= 0.1
+        reasons = append(reasons, "Contains excessive punctuation")
+    }
+
+    return score, reasons
 }
 
-func (fc *FactChecker) analyzeCitations(citations []string) float64 {
+func (fc *FactChecker) analyzeCitations(citations []string) (float64, string) {
     if len(citations) == 0 {
-        return 0.3
+        return 0.3, "No citations provided"
     }
 
     reliableCount := 0
@@ -210,17 +254,28 @@ func (fc *FactChecker) analyzeCitations(citations []string) float64 {
         }
     }
 
-    return float64(reliableCount) / float64(len(citations))
+    score := float64(reliableCount) / float64(len(citations))
+    
+    switch {
+    case reliableCount >= 3:
+        return score, "Multiple reliable citations provided"
+    case reliableCount >= 1:
+        return score, "At least one reliable citation provided"
+    default:
+        return score, "Limited reliable citations"
+    }
 }
 
 func (fc *FactChecker) isClaim(sentence string) bool {
-    // Simple heuristic for identifying claims
     claimIndicators := []string{
         "according to",
         "researchers found",
         "studies show",
         "evidence suggests",
         "experts say",
+        "research indicates",
+        "data shows",
+        "analysis reveals",
     }
 
     sentence = strings.ToLower(strings.TrimSpace(sentence))
@@ -246,6 +301,9 @@ func (fc *FactChecker) hasClickbaitPatterns(content string) bool {
         "mind-blowing",
         "doctors hate",
         "this one weird trick",
+        "secret they don't want you to know",
+        "miracle cure",
+        "instant results",
     }
 
     content = strings.ToLower(content)
@@ -264,6 +322,9 @@ func (fc *FactChecker) hasEmotionalManipulation(content string) bool {
         "alarming",
         "terrifying",
         "outrageous",
+        "devastating",
+        "life-changing",
+        "revolutionary",
     }
 
     content = strings.ToLower(content)
@@ -282,26 +343,47 @@ func (fc *FactChecker) hasBalancedPerspectives(content string) bool {
         "alternatively",
         "in contrast",
         "different perspective",
+        "some argue",
+        "others suggest",
+        "contrary to",
     }
 
     content = strings.ToLower(content)
+    count := 0
     for _, indicator := range indicators {
         if strings.Contains(content, indicator) {
+            count++
+        }
+    }
+    return count >= 2
+}
+
+func (fc *FactChecker) hasExcessivePunctuation(content string) bool {
+    patterns := []string{
+        `[!]{2,}`,
+        `[?]{2,}`,
+        `[.]{4,}`,
+    }
+
+    for _, pattern := range patterns {
+        if matched, _ := regexp.MatchString(pattern, content); matched {
             return true
         }
     }
+
     return false
 }
 
 func (fc *FactChecker) isReliableCitation(citation string) bool {
-    // This would check against a database of reliable sources
-    // For now, implement basic checks
     reliableDomains := []string{
         ".edu",
         ".gov",
         "nature.com",
         "science.org",
         "reuters.com",
+        "ap.org",
+        "bbc.com",
+        "bloomberg.com",
     }
 
     citation = strings.ToLower(citation)
