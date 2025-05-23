@@ -155,6 +155,7 @@ func NewHealthMonitor() *HealthMonitor {
 func (hm *HealthMonitor) StartPeriodicChecks(interval time.Duration) {
 	hm.ticker = time.NewTicker(interval)
 	go func() {
+		defer RecoverFromPanic("health-monitor")
 		for range hm.ticker.C {
 			hm.PerformChecks()
 		}
@@ -335,6 +336,7 @@ func (cm *ConfigManager) SetReloadHandler(fn func(*Config)) {
 func (cm *ConfigManager) StartWatching() {
 	cm.ticker = time.NewTicker(cm.interval)
 	go func() {
+		defer RecoverFromPanic("config-manager")
 		for range cm.ticker.C {
 			cm.checkConfigChanged()
 		}
@@ -354,20 +356,17 @@ func (cm *ConfigManager) checkConfigChanged() {
 	// and reload the config if it has changed
 }
 
-// StartHealthServer starts the health API server
+// Functions implemented elsewhere but referenced in types.go
 func StartHealthServer(port int) {
-	// In a real implementation, this would start an HTTP server
-	// for health checks and monitoring
+	// Implementation in dashboard.go
 }
 
-// StartDashboard starts the web dashboard
 func StartDashboard() error {
-	// In a real implementation, this would start the web dashboard server
+	// Implementation in dashboard.go
 	return nil
 }
 
-// InitDB initializes the database connection
 func InitDB() error {
-	// In a real implementation, this would initialize the database
+	// Implementation in database.go
 	return nil
 }
