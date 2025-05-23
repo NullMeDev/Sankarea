@@ -326,6 +326,7 @@ func (b *Bot) handleEnableSource(s *discordgo.Session, i *discordgo.InteractionC
 func (b *Bot) handleDisableSource(s *discordgo.Session, i *discordgo.InteractionCreate) error {
     return fmt.Errorf("not implemented")
 }
+
 // Adding to the existing commands.go file
 
 // handleAddSource handles adding a new news source
