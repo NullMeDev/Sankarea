@@ -6,204 +6,280 @@ import (
     "fmt"
     "sync"
     "time"
-
-    "github.com/robfig/cron/v3"
 )
 
-// Scheduler manages scheduled tasks
+// Scheduler manages periodic tasks for the bot
 type Scheduler struct {
-    cron      *cron.Cron
-    mutex     sync.RWMutex
-    jobs      map[string]cron.EntryID
-    ctx       context.Context
-    cancel    context.CancelFunc
-    isRunning bool
+    ctx        context.Context
+    cancel     context.CancelFunc
+    wg         sync.WaitGroup
+    mutex      sync.RWMutex
+    tasks      map[string]*Task
+    discord    *discordgo.Session
 }
 
-// NewScheduler creates a new scheduler instance
-func NewScheduler() *Scheduler {
+// Task represents a scheduled task
+type Task struct {
+    Name        string
+    Interval    time.Duration
+    LastRun     time.Time
+    IsRunning   bool
+    Enabled     bool
+    Handler     func(context.Context) error
+}
+
+// NewScheduler creates a new Scheduler instance
+func NewScheduler(discord *discordgo.Session) *Scheduler {
     ctx, cancel := context.WithCancel(context.Background())
     return &Scheduler{
-        cron:  cron.New(cron.WithSeconds()),
-        jobs:  make(map[string]cron.EntryID),
-        ctx:   ctx,
-        cancel: cancel,
+        ctx:     ctx,
+        cancel:  cancel,
+        tasks:   make(map[string]*Task),
+        discord: discord,
     }
 }
 
-// Start begins the scheduler
+// Start initializes and starts all scheduled tasks
 func (s *Scheduler) Start() error {
-    s.mutex.Lock()
-    defer s.mutex.Unlock()
+    Logger().Println("Starting scheduler...")
 
-    if s.isRunning {
-        return fmt.Errorf("scheduler is already running")
-    }
+    // Register default tasks
+    s.registerDefaultTasks()
 
-    // Schedule news fetching
-    if cfg.News15MinCron != "" {
-        if err := s.scheduleNewsUpdate(cfg.News15MinCron); err != nil {
-            return fmt.Errorf("failed to schedule news updates: %v", err)
+    // Start all enabled tasks
+    for name, task := range s.tasks {
+        if task.Enabled {
+            s.wg.Add(1)
+            go s.runTask(name, task)
         }
-    }
-
-    // Schedule daily digest
-    if cfg.DigestCronSchedule != "" {
-        if err := s.scheduleDigest(cfg.DigestCronSchedule); err != nil {
-            return fmt.Errorf("failed to schedule digest: %v", err)
-        }
-    }
-
-    // Start the cron scheduler
-    s.cron.Start()
-    s.isRunning = true
-
-    // Update next run times in state
-    if err := s.updateNextRunTimes(); err != nil {
-        Logger().Printf("Failed to update next run times: %v", err)
     }
 
     return nil
 }
 
-// Stop halts the scheduler
+// Stop gracefully stops all scheduled tasks
 func (s *Scheduler) Stop() {
+    Logger().Println("Stopping scheduler...")
+    s.cancel()
+    s.wg.Wait()
+}
+
+// RegisterTask adds a new task to the scheduler
+func (s *Scheduler) RegisterTask(name string, interval time.Duration, handler func(context.Context) error) {
     s.mutex.Lock()
     defer s.mutex.Unlock()
 
-    if !s.isRunning {
-        return
+    s.tasks[name] = &Task{
+        Name:     name,
+        Interval: interval,
+        Enabled:  true,
+        Handler:  handler,
     }
-
-    s.cancel()
-    ctx := s.cron.Stop()
-    <-ctx.Done()
-    s.isRunning = false
 }
 
-// scheduleNewsUpdate sets up the news fetching schedule
-func (s *Scheduler) scheduleNewsUpdate(schedule string) error {
-    id, err := s.cron.AddFunc(schedule, func() {
-        if err := s.runNewsUpdate(); err != nil {
-            Logger().Printf("Scheduled news update failed: %v", err)
-        }
+// registerDefaultTasks sets up the default bot tasks
+func (s *Scheduler) registerDefaultTasks() {
+    // News fetching task
+    s.RegisterTask("news_fetch", time.Duration(cfg.NewsIntervalMinutes)*time.Minute, func(ctx context.Context) error {
+        np := NewNewsProcessor()
+        return np.ProcessNews(ctx, s.discord)
     })
-    if err != nil {
-        return fmt.Errorf("failed to schedule news update: %v", err)
-    }
-    s.jobs["news"] = id
-    return nil
-}
 
-// scheduleDigest sets up the daily digest schedule
-func (s *Scheduler) scheduleDigest(schedule string) error {
-    id, err := s.cron.AddFunc(schedule, func() {
-        if err := s.runDailyDigest(); err != nil {
-            Logger().Printf("Scheduled digest failed: %v", err)
+    // Daily digest task - runs at configured time
+    s.RegisterTask("daily_digest", 24*time.Hour, func(ctx context.Context) error {
+        // Only run if within the configured time window
+        if isDigestTime() {
+            return generateAndSendDigest(ctx, s.discord)
         }
+        return nil
     })
-    if err != nil {
-        return fmt.Errorf("failed to schedule digest: %v", err)
-    }
-    s.jobs["digest"] = id
-    return nil
+
+    // Fact-checking update task
+    s.RegisterTask("fact_check_update", 6*time.Hour, func(ctx context.Context) error {
+        return updateFactChecks(ctx, s.discord)
+    })
+
+    // Metrics collection task
+    s.RegisterTask("metrics_collection", time.Duration(cfg.MetricsInterval), func(ctx context.Context) error {
+        return collectMetrics(ctx)
+    })
+
+    // State backup task
+    s.RegisterTask("state_backup", time.Duration(cfg.StateBackupInterval), func(ctx context.Context) error {
+        return SaveState(state)
+    })
+
+    // Health check task
+    s.RegisterTask("health_check", 5*time.Minute, func(ctx context.Context) error {
+        return performHealthCheck(ctx)
+    })
 }
 
-// runNewsUpdate executes the news update task
-func (s *Scheduler) runNewsUpdate() error {
-    // Check if system is in lockdown or paused
-    state := GetState()
-    if state.Lockdown {
-        return fmt.Errorf("system is in lockdown mode")
-    }
-    if state.Paused {
-        return fmt.Errorf("system is paused")
-    }
+// runTask executes a task at its specified interval
+func (s *Scheduler) runTask(name string, task *Task) {
+    defer s.wg.Done()
+    defer RecoverFromPanic(fmt.Sprintf("task-%s", name))
 
-    // Create a context with timeout for the news fetch
-    ctx, cancel := context.WithTimeout(s.ctx, 10*time.Minute)
+    ticker := time.NewTicker(task.Interval)
+    defer ticker.Stop()
+
+    Logger().Printf("Started task: %s (interval: %v)", name, task.Interval)
+
+    for {
+        select {
+        case <-s.ctx.Done():
+            Logger().Printf("Stopping task: %s", name)
+            return
+        case <-ticker.C:
+            if err := s.executeTask(name, task); err != nil {
+                Logger().Printf("Error in task %s: %v", name, err)
+                
+                // Update error stats
+                if err := UpdateState(func(s *State) {
+                    s.ErrorCount++
+                    s.LastError = err.Error()
+                    s.LastErrorTime = time.Now()
+                }); err != nil {
+                    Logger().Printf("Failed to update state after task error: %v", err)
+                }
+            }
+        }
+    }
+}
+
+// executeTask runs a single task with proper state management
+func (s *Scheduler) executeTask(name string, task *Task) error {
+    s.mutex.Lock()
+    if task.IsRunning {
+        s.mutex.Unlock()
+        return fmt.Errorf("task %s is already running", name)
+    }
+    task.IsRunning = true
+    task.LastRun = time.Now()
+    s.mutex.Unlock()
+
+    defer func() {
+        s.mutex.Lock()
+        task.IsRunning = false
+        s.mutex.Unlock()
+    }()
+
+    // Create task context with timeout
+    ctx, cancel := context.WithTimeout(s.ctx, DefaultTimeout)
     defer cancel()
 
-    // Update state before starting
-    if err := UpdateState(func(s *State) {
-        s.LastFetchTime = time.Now()
-    }); err != nil {
-        return fmt.Errorf("failed to update state: %v", err)
+    // Execute the task
+    return task.Handler(ctx)
+}
+
+// Helper functions
+
+func isDigestTime() bool {
+    now := time.Now().UTC()
+    targetHour := cfg.DigestHour
+    targetMinute := cfg.DigestMinute
+
+    return now.Hour() == targetHour && now.Minute() == targetMinute
+}
+
+func updateFactChecks(ctx context.Context, s *discordgo.Session) error {
+    fc := NewFactChecker()
+    state, err := LoadState()
+    if err != nil {
+        return err
     }
 
-    // Perform news fetch
-    if err := fetchNewsWithContext(ctx); err != nil {
-        return fmt.Errorf("news fetch failed: %v", err)
+    // Update fact checks for recent articles
+    for _, article := range state.RecentArticles {
+        if time.Since(article.LastFactCheck) > 6*time.Hour {
+            result, err := fc.CheckArticle(ctx, article)
+            if err != nil {
+                Logger().Printf("Error fact-checking article %s: %v", article.ID, err)
+                continue
+            }
+
+            // Update article with new fact check results
+            article.FactCheckResult = result
+            article.LastFactCheck = time.Now()
+
+            // Notify if reliability changed significantly
+            if needsReliabilityUpdate(article) {
+                notifyReliabilityChange(s, article)
+            }
+        }
     }
 
     return nil
 }
 
-// runDailyDigest executes the daily digest task
-func (s *Scheduler) runDailyDigest() error {
-    state := GetState()
-    if state.Lockdown {
-        return fmt.Errorf("system is in lockdown mode")
-    }
-    if state.Paused {
-        return fmt.Errorf("system is paused")
-    }
-
-    // Create a context with timeout for the digest generation
-    ctx, cancel := context.WithTimeout(s.ctx, 5*time.Minute)
-    defer cancel()
-
-    // Update state before starting
-    if err := UpdateState(func(s *State) {
-        s.LastDigest = time.Now()
-    }); err != nil {
-        return fmt.Errorf("failed to update state: %v", err)
+func collectMetrics(ctx context.Context) error {
+    metrics := &Metrics{
+        Timestamp:     time.Now(),
+        ArticleCount:  state.ArticleCount,
+        ErrorCount:    state.ErrorCount,
+        SourceCount:   len(state.Sources),
+        UpTime:       time.Since(state.StartupTime),
     }
 
-    // Generate and send digest
-    if err := generateDigestWithContext(ctx); err != nil {
-        return fmt.Errorf("digest generation failed: %v", err)
+    // Save metrics to database if enabled
+    if cfg.EnableDatabase {
+        if err := saveMetrics(ctx, metrics); err != nil {
+            return fmt.Errorf("failed to save metrics: %v", err)
+        }
+    }
+
+    // Update dashboard if enabled
+    if cfg.EnableDashboard {
+        if err := dashboard.UpdateMetrics(metrics); err != nil {
+            return fmt.Errorf("failed to update dashboard metrics: %v", err)
+        }
     }
 
     return nil
 }
 
-// updateNextRunTimes updates the state with next scheduled run times
-func (s *Scheduler) updateNextRunTimes() error {
-    s.mutex.RLock()
-    defer s.mutex.RUnlock()
+func performHealthCheck(ctx context.Context) error {
+    // Check critical services
+    checks := map[string]bool{
+        "discord": s.discord.State.User != nil,
+        "database": checkDatabaseConnection(),
+        "apis": checkExternalAPIs(),
+    }
 
-    entries := s.cron.Entries()
-    nextNews := time.Time{}
-    nextDigest := time.Time{}
-
-    for _, entry := range entries {
-        if jobID, exists := s.jobs["news"]; exists && entry.ID == jobID {
-            nextNews = entry.Next
-        }
-        if jobID, exists := s.jobs["digest"]; exists && entry.ID == jobID {
-            nextDigest = entry.Next
+    // Update health status
+    status := StatusOK
+    for service, healthy := range checks {
+        if !healthy {
+            Logger().Printf("Health check failed for %s", service)
+            status = StatusDegraded
         }
     }
 
+    // Update state
     return UpdateState(func(s *State) {
-        s.NewsNextTime = nextNews
-        s.DigestNextTime = nextDigest
+        s.HealthStatus = status
+        s.LastHealthCheck = time.Now()
     })
 }
 
-// IsRunning returns whether the scheduler is currently active
-func (s *Scheduler) IsRunning() bool {
-    s.mutex.RLock()
-    defer s.mutex.RUnlock()
-    return s.isRunning
+func checkDatabaseConnection() bool {
+    if !cfg.EnableDatabase || db == nil {
+        return true
+    }
+    return db.PingContext(context.Background()) == nil
 }
 
-// GetNextRunTimes returns the next scheduled run times for news and digest
-func (s *Scheduler) GetNextRunTimes() (news, digest time.Time) {
-    s.mutex.RLock()
-    defer s.mutex.RUnlock()
+func checkExternalAPIs() bool {
+    apis := []string{
+        "https://discord.com/api/v10",
+        "https://factchecktools.googleapis.com",
+        "https://idir.uta.edu/claimbuster",
+    }
 
-    state := GetState()
-    return state.NewsNextTime, state.DigestNextTime
+    for _, api := range apis {
+        if _, err := http.Get(api); err != nil {
+            return false
+        }
+    }
+    return true
 }
