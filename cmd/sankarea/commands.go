@@ -4,348 +4,316 @@ package main
 import (
     "fmt"
     "strings"
-    "time"
 
     "github.com/bwmarrin/discordgo"
 )
 
-// CommandHandler represents a slash command handler
-type CommandHandler struct {
-    Name        string
-    Description string
-    Options     []*discordgo.ApplicationCommandOption
-    Handler     func(s *discordgo.Session, i *discordgo.InteractionCreate)
-    Permission  int // Using constants defined earlier (PermLevelEveryone, PermLevelAdmin, etc.)
+// CommandHandler represents a function that handles a Discord command
+type CommandHandler func(s *discordgo.Session, i *discordgo.InteractionCreate)
+
+// commands stores the mapping of command names to their handlers
+var commands = map[string]CommandHandler{
+    "ping":      handlePingCommand,
+    "status":    handleStatusCommand,
+    "version":   handleVersionCommand,
+    "source":    handleSourceCommand,
+    "admin":     handleAdminCommand,
+    "factcheck": handleFactCheckCommand,
+    "digest":    handleDigestCommand,
+    "help":      handleHelpCommand,
 }
 
-var commands = []*discordgo.ApplicationCommand{
+// commandDefinitions defines all slash commands and their options
+var commandDefinitions = []*discordgo.ApplicationCommand{
     {
-        Name:        "news",
-        Description: "News related commands",
-        Options: []*discordgo.ApplicationCommandOption{
-            {
-                Type:        discordgo.ApplicationCommandOptionSubCommand,
-                Name:        "fetch",
-                Description: "Manually fetch news from sources",
-            },
-            {
-                Type:        discordgo.ApplicationCommandOptionSubCommand,
-                Name:        "sources",
-                Description: "List all news sources",
-            },
-            {
-                Type:        discordgo.ApplicationCommandOptionSubCommand,
-                Name:        "pause",
-                Description: "Pause news fetching",
-            },
-            {
-                Type:        discordgo.ApplicationCommandOptionSubCommand,
-                Name:        "resume",
-                Description: "Resume news fetching",
-            },
-        },
+        Name:        "ping",
+        Description: "Check if the bot is alive",
     },
     {
         Name:        "status",
-        Description: "Show bot status and statistics",
+        Description: "Show current bot status and statistics",
     },
     {
-        Name:        "digest",
-        Description: "Generate a news digest",
-        Options: []*discordgo.ApplicationCommandOption{
-            {
-                Type:        discordgo.ApplicationCommandOptionString,
-                Name:        "period",
-                Description: "Time period for digest (daily/weekly)",
-                Required:    false,
-                Choices: []*discordgo.ApplicationCommandOptionChoice{
-                    {
-                        Name:  "Daily",
-                        Value: "daily",
-                    },
-                    {
-                        Name:  "Weekly",
-                        Value: "weekly",
-                    },
-                },
-            },
-        },
+        Name:        "version",
+        Description: "Show bot version information",
     },
     {
-        Name:        "admin",
-        Description: "Administrative commands",
+        Name:        "source",
+        Description: "Manage news sources",
         Options: []*discordgo.ApplicationCommandOption{
             {
                 Type:        discordgo.ApplicationCommandOptionSubCommand,
-                Name:        "lockdown",
-                Description: "Enable/disable lockdown mode",
+                Name:        "add",
+                Description: "Add a new news source",
                 Options: []*discordgo.ApplicationCommandOption{
                     {
+                        Type:        discordgo.ApplicationCommandOptionString,
+                        Name:        "name",
+                        Description: "Name of the news source",
+                        Required:    true,
+                    },
+                    {
+                        Type:        discordgo.ApplicationCommandOptionString,
+                        Name:        "url",
+                        Description: "RSS feed URL",
+                        Required:    true,
+                    },
+                    {
+                        Type:        discordgo.ApplicationCommandOptionString,
+                        Name:        "category",
+                        Description: "News category",
+                        Required:    true,
+                        Choices: []*discordgo.ApplicationCommandOptionChoice{
+                            {Name: "Technology", Value: CategoryTechnology},
+                            {Name: "Business", Value: CategoryBusiness},
+                            {Name: "Science", Value: CategoryScience},
+                            {Name: "Health", Value: CategoryHealth},
+                            {Name: "Politics", Value: CategoryPolitics},
+                            {Name: "Sports", Value: CategorySports},
+                            {Name: "World", Value: CategoryWorld},
+                        },
+                    },
+                    {
                         Type:        discordgo.ApplicationCommandOptionBoolean,
-                        Name:        "enable",
-                        Description: "Enable or disable lockdown",
+                        Name:        "fact_check",
+                        Description: "Enable fact-checking for this source",
+                        Required:    false,
+                    },
+                },
+            },
+            {
+                Type:        discordgo.ApplicationCommandOptionSubCommand,
+                Name:        "remove",
+                Description: "Remove a news source",
+                Options: []*discordgo.ApplicationCommandOption{
+                    {
+                        Type:        discordgo.ApplicationCommandOptionString,
+                        Name:        "name",
+                        Description: "Name of the news source to remove",
                         Required:    true,
                     },
                 },
             },
+            {
+                Type:        discordgo.ApplicationCommandOptionSubCommand,
+                Name:        "list",
+                Description: "List all news sources",
+            },
+            {
+                Type:        discordgo.ApplicationCommandOptionSubCommand,
+                Name:        "update",
+                Description: "Update a news source",
+                Options: []*discordgo.ApplicationCommandOption{
+                    {
+                        Type:        discordgo.ApplicationCommandOptionString,
+                        Name:        "name",
+                        Description: "Name of the news source",
+                        Required:    true,
+                    },
+                    {
+                        Type:        discordgo.ApplicationCommandOptionString,
+                        Name:        "url",
+                        Description: "New RSS feed URL",
+                        Required:    false,
+                    },
+                    {
+                        Type:        discordgo.ApplicationCommandOptionString,
+                        Name:        "category",
+                        Description: "New category",
+                        Required:    false,
+                        Choices: []*discordgo.ApplicationCommandOption{
+                            {Name: "Technology", Value: CategoryTechnology},
+                            {Name: "Business", Value: CategoryBusiness},
+                            {Name: "Science", Value: CategoryScience},
+                            {Name: "Health", Value: CategoryHealth},
+                            {Name: "Politics", Value: CategoryPolitics},
+                            {Name: "Sports", Value: CategorySports},
+                            {Name: "World", Value: CategoryWorld},
+                        },
+                    },
+                    {
+                        Type:        discordgo.ApplicationCommandOptionBoolean,
+                        Name:        "paused",
+                        Description: "Pause/unpause the source",
+                        Required:    false,
+                    },
+                },
+            },
+        },
+    },
+    {
+        Name:        "admin",
+        Description: "Administrative commands",
+        Options: []*discordgo.ApplicationCommandOption{
+            {
+                Type:        discordgo.ApplicationCommandOptionSubCommand,
+                Name:        "pause",
+                Description: "Pause news gathering",
+            },
+            {
+                Type:        discordgo.ApplicationCommandOptionSubCommand,
+                Name:        "resume",
+                Description: "Resume news gathering",
+            },
+            {
+                Type:        discordgo.ApplicationCommandOptionSubCommand,
+                Name:        "reload",
+                Description: "Reload configuration",
+            },
+            {
+                Type:        discordgo.ApplicationCommandOptionSubCommand,
+                Name:        "config",
+                Description: "View/update config",
+                Options: []*discordgo.ApplicationCommandOption{
+                    {
+                        Type:        discordgo.ApplicationCommandOptionInteger,
+                        Name:        "max_posts",
+                        Description: "Maximum posts per interval",
+                        Required:    false,
+                    },
+                    {
+                        Type:        discordgo.ApplicationCommandOptionInteger,
+                        Name:        "interval",
+                        Description: "News fetch interval (minutes)",
+                        Required:    false,
+                    },
+                },
+            },
+        },
+    },
+    {
+        Name:        "factcheck",
+        Description: "Fact-check operations",
+        Options: []*discordgo.ApplicationCommandOption{
+            {
+                Type:        discordgo.ApplicationCommandOptionString,
+                Name:        "url",
+                Description: "URL of the article to fact-check",
+                Required:    true,
+            },
+        },
+    },
+    {
+        Name:        "digest",
+        Description: "Generate news digest",
+        Options: []*discordgo.ApplicationCommandOption{
+            {
+                Type:        discordgo.ApplicationCommandOptionString,
+                Name:        "period",
+                Description: "Time period for digest",
+                Required:    false,
+                Choices: []*discordgo.ApplicationCommandOptionChoice{
+                    {Name: "Daily", Value: "daily"},
+                    {Name: "Weekly", Value: "weekly"},
+                },
+            },
+        },
+    },
+    {
+        Name:        "help",
+        Description: "Show help information",
+        Options: []*discordgo.ApplicationCommandOption{
+            {
+                Type:        discordgo.ApplicationCommandOptionString,
+                Name:        "command",
+                Description: "Specific command to get help for",
+                Required:    false,
+            },
         },
     },
 }
 
-var commandHandlers = map[string]*CommandHandler{
-    "news": {
-        Name:        "news",
-        Description: "News related commands",
-        Permission:  PermLevelEveryone,
-        Handler:     handleNewsCommand,
-    },
-    "status": {
-        Name:        "status",
-        Description: "Show bot status and statistics",
-        Permission:  PermLevelEveryone,
-        Handler:     handleStatusCommand,
-    },
-    "digest": {
-        Name:        "digest",
-        Description: "Generate a news digest",
-        Permission:  PermLevelEveryone,
-        Handler:     handleDigestCommand,
-    },
-    "admin": {
-        Name:        "admin",
-        Description: "Administrative commands",
-        Permission:  PermLevelAdmin,
-        Handler:     handleAdminCommand,
-    },
-}
+// RegisterCommands registers all slash commands with Discord
+func RegisterCommands(s *discordgo.Session) error {
+    Logger().Println("Registering commands...")
 
-// registerCommands registers all slash commands
-func registerCommands(s *discordgo.Session) error {
-    Logger().Printf("Registering %d commands...", len(commands))
-
-    // Remove existing commands first
-    registeredCommands, err := s.ApplicationCommands(cfg.AppID, cfg.GuildID)
+    // Get existing commands
+    existingCommands, err := s.ApplicationCommands(s.State.User.ID, "")
     if err != nil {
-        return fmt.Errorf("failed to fetch registered commands: %v", err)
+        return fmt.Errorf("failed to get existing commands: %v", err)
     }
 
-    for _, cmd := range registeredCommands {
-        if err := s.ApplicationCommandDelete(cfg.AppID, cfg.GuildID, cmd.ID); err != nil {
+    // Delete existing commands
+    for _, cmd := range existingCommands {
+        if err := s.ApplicationCommandDelete(s.State.User.ID, "", cmd.ID); err != nil {
             Logger().Printf("Failed to delete command %s: %v", cmd.Name, err)
         }
     }
 
     // Register new commands
-    for _, cmd := range commands {
-        _, err := s.ApplicationCommandCreate(cfg.AppID, cfg.GuildID, cmd)
+    for _, cmd := range commandDefinitions {
+        _, err := s.ApplicationCommandCreate(s.State.User.ID, "", cmd)
         if err != nil {
-            return fmt.Errorf("failed to register command %s: %v", cmd.Name, err)
+            return fmt.Errorf("failed to create command %s: %v", cmd.Name, err)
         }
     }
 
-    Logger().Printf("Successfully registered %d commands", len(commands))
+    Logger().Printf("Successfully registered %d commands", len(commandDefinitions))
     return nil
 }
 
-// handleNewsCommand handles all news-related subcommands
-func handleNewsCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
-    options := i.ApplicationCommandData().Options
-    if len(options) == 0 {
-        respondWithError(s, i, "Invalid subcommand")
+// HandleCommand routes command interactions to their handlers
+func HandleCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
+    if i.Type != discordgo.InteractionApplicationCommand {
         return
     }
 
-    subcommand := options[0].Name
-    switch subcommand {
-    case "fetch":
-        handleNewsFetch(s, i)
-    case "sources":
-        handleNewsSources(s, i)
-    case "pause":
-        handleNewsPause(s, i)
-    case "resume":
-        handleNewsResume(s, i)
-    default:
-        respondWithError(s, i, "Unknown subcommand")
-    }
-}
+    // Get command name
+    cmdName := i.ApplicationCommandData().Name
 
-// handleNewsFetch handles manual news fetching
-func handleNewsFetch(s *discordgo.Session, i *discordgo.InteractionCreate) {
-    // Acknowledge the command
-    s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-        Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
-    })
-
-    // Start fetching
-    if err := fetchNewsWithContext(context.Background()); err != nil {
-        followupWithError(s, i, fmt.Sprintf("Failed to fetch news: %v", err))
+    // Check if handler exists
+    handler, exists := commands[cmdName]
+    if !exists {
+        respondWithError(s, i, "Unknown command")
         return
     }
 
-    // Send success response
-    s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
-        Content: stringPtr("✅ News fetch completed successfully!"),
-    })
-}
-
-// handleNewsSources lists all configured sources
-func handleNewsSources(s *discordgo.Session, i *discordgo.InteractionCreate) {
-    sources := loadSources()
-    
-    // Build sources list
-    var activeCount, pausedCount int
-    var content strings.Builder
-    content.WriteString("📰 **News Sources**\n\n")
-
-    for _, source := range sources {
-        status := "🟢"
-        if source.Paused {
-            status = "🔴"
-            pausedCount++
-        } else {
-            activeCount++
-        }
-
-        content.WriteString(fmt.Sprintf("%s **%s**\n", status, source.Name))
-        if source.Description != "" {
-            content.WriteString(fmt.Sprintf("└ %s\n", source.Description))
-        }
+    // Check permissions
+    if !CheckCommandPermissions(s, i) {
+        respondWithError(s, i, "You don't have permission to use this command")
+        return
     }
 
-    content.WriteString(fmt.Sprintf("\n**Summary:** %d Active, %d Paused", activeCount, pausedCount))
+    // Execute handler
+    handler(s, i)
+}
 
+// Helper functions
+
+func CheckCommandPermissions(s *discordgo.Session, i *discordgo.InteractionCreate) bool {
+    // Admin commands require admin permissions
+    if i.ApplicationCommandData().Name == "admin" {
+        return hasAdminPermission(s, i)
+    }
+
+    // Source management commands require manage server permission
+    if i.ApplicationCommandData().Name == "source" {
+        return hasManageServerPermission(s, i)
+    }
+
+    return true
+}
+
+func hasAdminPermission(s *discordgo.Session, i *discordgo.InteractionCreate) bool {
+    // Check if user is bot owner
+    if i.Member.User.ID == cfg.OwnerID {
+        return true
+    }
+
+    // Check if user has admin permission
+    return i.Member.Permissions&discordgo.PermissionAdministrator != 0
+}
+
+func hasManageServerPermission(s *discordgo.Session, i *discordgo.InteractionCreate) bool {
+    return i.Member.Permissions&discordgo.PermissionManageServer != 0
+}
+
+func respondWithError(s *discordgo.Session, i *discordgo.InteractionCreate, message string) {
     s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
         Type: discordgo.InteractionResponseChannelMessageWithSource,
         Data: &discordgo.InteractionResponseData{
-            Content: content.String(),
+            Content: "❌ " + message,
+            Flags:   discordgo.MessageFlagsEphemeral,
         },
     })
-}
-
-// handleNewsPause pauses news fetching
-func handleNewsPause(s *discordgo.Session, i *discordgo.InteractionCreate) {
-    if err := UpdateState(func(s *State) {
-        s.Paused = true
-        s.PausedBy = i.Member.User.Username
-    }); err != nil {
-        respondWithError(s, i, "Failed to update state")
-        return
-    }
-
-    s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-        Type: discordgo.InteractionResponseChannelMessageWithSource,
-        Data: &discordgo.InteractionResponseData{
-            Content: "⏸️ News fetching has been paused",
-        },
-    })
-}
-
-// handleNewsResume resumes news fetching
-func handleNewsResume(s *discordgo.Session, i *discordgo.InteractionCreate) {
-    if err := UpdateState(func(s *State) {
-        s.Paused = false
-        s.PausedBy = ""
-    }); err != nil {
-        respondWithError(s, i, "Failed to update state")
-        return
-    }
-
-    s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-        Type: discordgo.InteractionResponseChannelMessageWithSource,
-        Data: &discordgo.InteractionResponseData{
-            Content: "▶️ News fetching has been resumed",
-        },
-    })
-}
-
-// handleDigestCommand generates a news digest
-func handleDigestCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
-    // Acknowledge the command
-    s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-        Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
-    })
-
-    period := "daily" // default
-    if len(i.ApplicationCommandData().Options) > 0 {
-        period = i.ApplicationCommandData().Options[0].StringValue()
-    }
-
-    var err error
-    switch period {
-    case "daily":
-        err = GenerateDailyDigest(s, i.ChannelID)
-    case "weekly":
-        err = GenerateWeeklyDigest(s, i.ChannelID)
-    default:
-        err = fmt.Errorf("invalid digest period")
-    }
-
-    if err != nil {
-        followupWithError(s, i, fmt.Sprintf("Failed to generate digest: %v", err))
-        return
-    }
-
-    // Update digest stats
-    UpdateState(func(s *State) {
-        s.DigestCount++
-        s.LastDigest = time.Now()
-    })
-}
-
-// handleAdminCommand handles administrative commands
-func handleAdminCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
-    if !isAdmin(i.Member.User.ID) {
-        respondWithError(s, i, "You don't have permission to use admin commands")
-        return
-    }
-
-    options := i.ApplicationCommandData().Options
-    if len(options) == 0 {
-        respondWithError(s, i, "Invalid subcommand")
-        return
-    }
-
-    subcommand := options[0].Name
-    switch subcommand {
-    case "lockdown":
-        handleLockdown(s, i)
-    default:
-        respondWithError(s, i, "Unknown admin subcommand")
-    }
-}
-
-// handleLockdown handles lockdown mode
-func handleLockdown(s *discordgo.Session, i *discordgo.InteractionCreate) {
-    enable := i.ApplicationCommandData().Options[0].Options[0].BoolValue()
-
-    if err := UpdateState(func(s *State) {
-        s.Lockdown = enable
-        s.LockdownSetBy = i.Member.User.Username
-    }); err != nil {
-        respondWithError(s, i, "Failed to update lockdown state")
-        return
-    }
-
-    status := "enabled"
-    if !enable {
-        status = "disabled"
-    }
-
-    s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-        Type: discordgo.InteractionResponseChannelMessageWithSource,
-        Data: &discordgo.InteractionResponseData{
-            Content: fmt.Sprintf("🔒 Lockdown mode %s", status),
-        },
-    })
-}
-
-// isAdmin checks if a user has admin permissions
-func isAdmin(userID string) bool {
-    for _, id := range cfg.OwnerIDs {
-        if id == userID {
-            return true
-        }
-    }
-    return false
 }
