@@ -1,329 +1,322 @@
+// cmd/sankarea/database.go
 package main
 
 import (
-	"database/sql"
-	"fmt"
-	"time"
+    "context"
+    "database/sql"
+    "errors"
+    "fmt"
+    "time"
 
-	_ "github.com/mattn/go-sqlite3"
+    _ "github.com/lib/pq"
+    "github.com/jmoiron/sqlx"
 )
 
-var db *sql.DB
+var (
+    db *sqlx.DB
+    ErrDatabaseNotInitialized = errors.New("database not initialized")
+    ErrDatabaseTimeout       = errors.New("database operation timed out")
+)
 
-// InitDB initializes the SQLite database
-func InitDB() error {
-	var err error
-	db, err = sql.Open("sqlite3", "data/sankarea.db")
-	if err != nil {
-		return err
-	}
+const (
+    defaultQueryTimeout = 10 * time.Second
+    maxRetries         = 3
+    retryDelay        = time.Second * 2
+)
 
-	// Create tables if they don't exist
-	createTables := []string{
-		`CREATE TABLE IF NOT EXISTS articles (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			title TEXT NOT NULL,
-			url TEXT UNIQUE NOT NULL,
-			source_name TEXT NOT NULL,
-			published_at DATETIME NOT NULL,
-			fetched_at DATETIME NOT NULL,
-			content TEXT,
-			summary TEXT,
-			sentiment REAL DEFAULT 0,
-			fact_check_score REAL DEFAULT 0,
-			category TEXT,
-			channel_id TEXT
-		)`,
-		`CREATE TABLE IF NOT EXISTS fact_checks (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			article_id INTEGER NOT NULL,
-			claim TEXT NOT NULL,
-			rating TEXT NOT NULL,
-			source TEXT NOT NULL,
-			checked_at DATETIME NOT NULL,
-			FOREIGN KEY(article_id) REFERENCES articles(id)
-		)`,
-		`CREATE TABLE IF NOT EXISTS analytics (
-			date TEXT PRIMARY KEY,
-			articles_processed INTEGER DEFAULT 0,
-			messages_sent INTEGER DEFAULT 0,
-			api_calls INTEGER DEFAULT 0,
-			api_cost REAL DEFAULT 0,
-			errors INTEGER DEFAULT 0
-		)`,
-		`CREATE TABLE IF NOT EXISTS user_preferences (
-			user_id TEXT PRIMARY KEY,
-			saved_articles TEXT,
-			preferred_categories TEXT,
-			preferred_sources TEXT,
-			notification_enabled BOOLEAN DEFAULT 0,
-			theme TEXT DEFAULT 'light'
-		)`,
-		`CREATE TABLE IF NOT EXISTS topic_mentions (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			topic_name TEXT NOT NULL,
-			article_id INTEGER NOT NULL,
-			mention_count INTEGER DEFAULT 1,
-			mentioned_at DATETIME NOT NULL,
-			FOREIGN KEY(article_id) REFERENCES articles(id)
-		)`,
-	}
+// Database tables
+const (
+    createArticlesTable = `
+    CREATE TABLE IF NOT EXISTS articles (
+        id          SERIAL PRIMARY KEY,
+        title       TEXT NOT NULL,
+        content     TEXT,
+        url         TEXT NOT NULL UNIQUE,
+        source      TEXT NOT NULL,
+        timestamp   TIMESTAMP NOT NULL,
+        category    TEXT,
+        sentiment   FLOAT,
+        fact_score  FLOAT,
+        summary     TEXT,
+        bias        TEXT,
+        topics      TEXT[],
+        keywords    TEXT[],
+        created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`
 
-	for _, query := range createTables {
-		_, err := db.Exec(query)
-		if err != nil {
-			return err
-		}
-	}
+    createSourcesTable = `
+    CREATE TABLE IF NOT EXISTS sources (
+        id              SERIAL PRIMARY KEY,
+        name            TEXT NOT NULL UNIQUE,
+        url             TEXT NOT NULL,
+        category        TEXT,
+        description     TEXT,
+        bias           TEXT,
+        trust_score    FLOAT,
+        channel_override TEXT,
+        paused         BOOLEAN DEFAULT FALSE,
+        active         BOOLEAN DEFAULT TRUE,
+        tags           TEXT[],
+        last_fetched   TIMESTAMP,
+        last_error     TEXT,
+        last_error_time TIMESTAMP,
+        error_count    INTEGER DEFAULT 0,
+        feed_count     INTEGER DEFAULT 0,
+        uptime_percent FLOAT DEFAULT 100.0,
+        avg_response_time INTEGER DEFAULT 0,
+        created_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`
 
-	return nil
+    createMetricsTable = `
+    CREATE TABLE IF NOT EXISTS metrics (
+        id                SERIAL PRIMARY KEY,
+        timestamp        TIMESTAMP NOT NULL,
+        memory_usage_mb  FLOAT,
+        cpu_usage_percent FLOAT,
+        disk_usage_percent FLOAT,
+        articles_per_minute FLOAT,
+        errors_per_hour  FLOAT,
+        api_calls_per_hour FLOAT
+    )`
+)
+
+// initializeDatabase sets up the database connection and schema
+func initializeDatabase() error {
+    if !cfg.EnableDatabase {
+        return nil
+    }
+
+    // Build connection string
+    connStr := fmt.Sprintf(
+        "host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
+        cfg.DatabaseHost,
+        cfg.DatabasePort,
+        cfg.DatabaseUser,
+        cfg.DatabasePassword,
+        cfg.DatabaseName,
+        cfg.DatabaseSSLMode,
+    )
+
+    // Connect to database
+    var err error
+    db, err = sqlx.Connect("postgres", connStr)
+    if err != nil {
+        return fmt.Errorf("failed to connect to database: %v", err)
+    }
+
+    // Set connection pool settings
+    db.SetMaxOpenConns(25)
+    db.SetMaxIdleConns(5)
+    db.SetConnMaxLifetime(5 * time.Minute)
+
+    // Initialize schema
+    if err := initializeSchema(); err != nil {
+        return fmt.Errorf("failed to initialize schema: %v", err)
+    }
+
+    return nil
 }
 
-// CloseDB closes the database connection
-func CloseDB() error {
-	if db != nil {
-		return db.Close()
-	}
-	return nil
+// initializeSchema creates necessary database tables
+func initializeSchema() error {
+    ctx, cancel := context.WithTimeout(context.Background(), defaultQueryTimeout)
+    defer cancel()
+
+    queries := []string{
+        createArticlesTable,
+        createSourcesTable,
+        createMetricsTable,
+    }
+
+    tx, err := db.BeginTx(ctx, nil)
+    if err != nil {
+        return fmt.Errorf("failed to begin transaction: %v", err)
+    }
+
+    for _, query := range queries {
+        if _, err := tx.ExecContext(ctx, query); err != nil {
+            tx.Rollback()
+            return fmt.Errorf("failed to execute schema query: %v", err)
+        }
+    }
+
+    return tx.Commit()
 }
 
-// AddArticle adds a new article to the database
-func AddArticle(title, url, sourceName, content, summary, category, channelID string, published time.Time, sentiment, factScore float64) (int64, error) {
-	query := `INSERT INTO articles (
-		title, url, source_name, published_at, fetched_at, content, summary, 
-		sentiment, fact_check_score, category, channel_id
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+// storeArticle saves an article to the database
+func storeArticle(article *Article) error {
+    if !cfg.EnableDatabase || db == nil {
+        return ErrDatabaseNotInitialized
+    }
 
-	result, err := db.Exec(query, 
-		title, url, sourceName, published, time.Now(), content, summary, 
-		sentiment, factScore, category, channelID)
-	if err != nil {
-		return 0, err
-	}
+    ctx, cancel := context.WithTimeout(context.Background(), defaultQueryTimeout)
+    defer cancel()
 
-	// Get the new article ID
-	id, err := result.LastInsertId()
-	if err != nil {
-		return 0, err
-	}
+    query := `
+        INSERT INTO articles (
+            title, content, url, source, timestamp, category,
+            sentiment, fact_score, summary, bias, topics, keywords
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+        )
+        ON CONFLICT (url) DO UPDATE SET
+            title = EXCLUDED.title,
+            content = EXCLUDED.content,
+            sentiment = EXCLUDED.sentiment,
+            fact_score = EXCLUDED.fact_score,
+            summary = EXCLUDED.summary,
+            bias = EXCLUDED.bias,
+            topics = EXCLUDED.topics,
+            keywords = EXCLUDED.keywords
+    `
 
-	// Update daily analytics
-	updateDailyAnalytics("articles_processed", 1)
+    _, err := db.ExecContext(ctx, query,
+        article.Title,
+        article.Content,
+        article.URL,
+        article.Source,
+        article.Timestamp,
+        article.Category,
+        article.Sentiment,
+        article.FactScore,
+        article.Summary,
+        article.Bias,
+        article.Topics,
+        article.Keywords,
+    )
 
-	return id, nil
+    if err != nil {
+        return fmt.Errorf("failed to store article: %v", err)
+    }
+
+    return nil
 }
 
-// GetArticleByURL retrieves an article by its URL
-func GetArticleByURL(url string) (int64, bool, error) {
-	var id int64
-	query := "SELECT id FROM articles WHERE url = ?"
-	err := db.QueryRow(query, url).Scan(&id)
-	
-	if err == sql.ErrNoRows {
-		return 0, false, nil
-	}
-	
-	if err != nil {
-		return 0, false, err
-	}
-	
-	return id, true, nil
+// getRecentArticles retrieves recent articles from the database
+func getRecentArticles(limit int) ([]Article, error) {
+    if !cfg.EnableDatabase || db == nil {
+        return nil, ErrDatabaseNotInitialized
+    }
+
+    ctx, cancel := context.WithTimeout(context.Background(), defaultQueryTimeout)
+    defer cancel()
+
+    var articles []Article
+    query := `
+        SELECT title, content, url, source, timestamp, category,
+               sentiment, fact_score, summary, bias, topics, keywords
+        FROM articles
+        ORDER BY timestamp DESC
+        LIMIT $1
+    `
+
+    if err := db.SelectContext(ctx, &articles, query, limit); err != nil {
+        return nil, fmt.Errorf("failed to fetch recent articles: %v", err)
+    }
+
+    return articles, nil
 }
 
-// AddFactCheck adds a fact check result to the database
-func AddFactCheck(articleID int64, claim, rating, source string) error {
-	query := `INSERT INTO fact_checks (
-		article_id, claim, rating, source, checked_at
-	) VALUES (?, ?, ?, ?, ?)`
+// storeMetrics saves system metrics to the database
+func storeMetrics(metrics *Metrics) error {
+    if !cfg.EnableDatabase || db == nil {
+        return ErrDatabaseNotInitialized
+    }
 
-	_, err := db.Exec(query, 
-		articleID, claim, rating, source, time.Now())
-	
-	return err
+    ctx, cancel := context.WithTimeout(context.Background(), defaultQueryTimeout)
+    defer cancel()
+
+    query := `
+        INSERT INTO metrics (
+            timestamp, memory_usage_mb, cpu_usage_percent,
+            disk_usage_percent, articles_per_minute,
+            errors_per_hour, api_calls_per_hour
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+    `
+
+    _, err := db.ExecContext(ctx, query,
+        time.Now(),
+        metrics.MemoryUsageMB,
+        metrics.CPUUsagePercent,
+        metrics.DiskUsagePercent,
+        metrics.ArticlesPerMinute,
+        metrics.ErrorsPerHour,
+        metrics.APICallsPerHour,
+    )
+
+    if err != nil {
+        return fmt.Errorf("failed to store metrics: %v", err)
+    }
+
+    return nil
 }
 
-// GetArticlesByCategory gets articles by category within a time range
-func GetArticlesByCategory(category string, hours int) ([]ArticleDigest, error) {
-	query := `
-		SELECT 
-			title, url, source_name, published_at, category
-		FROM 
-			articles
-		WHERE 
-			category = ? AND published_at > ?
-		ORDER BY 
-			published_at DESC
-	`
-	
-	since := time.Now().Add(-time.Duration(hours) * time.Hour)
-	rows, err := db.Query(query, category, since)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	
-	var articles []ArticleDigest
-	for rows.Next() {
-		var article ArticleDigest
-		var publishedStr string
-		
-		err := rows.Scan(
-			&article.Title,
-			&article.URL,
-			&article.Source,
-			&publishedStr,
-			&article.Category,
-		)
-		if err != nil {
-			return nil, err
-		}
-		
-		// Parse published time
-		article.Published, _ = time.Parse("2006-01-02 15:04:05", publishedStr)
-		
-		articles = append(articles, article)
-	}
-	
-	if err = rows.Err(); err != nil {
-		return nil, err
-	}
-	
-	return articles, nil
+// updateSourceStats updates source statistics in the database
+func updateSourceStats(source *Source) error {
+    if !cfg.EnableDatabase || db == nil {
+        return ErrDatabaseNotInitialized
+    }
+
+    ctx, cancel := context.WithTimeout(context.Background(), defaultQueryTimeout)
+    defer cancel()
+
+    query := `
+        UPDATE sources SET
+            last_fetched = $1,
+            last_error = $2,
+            last_error_time = $3,
+            error_count = $4,
+            feed_count = $5,
+            uptime_percent = $6,
+            avg_response_time = $7
+        WHERE name = $8
+    `
+
+    _, err := db.ExecContext(ctx, query,
+        source.LastFetched,
+        source.LastError,
+        source.LastErrorTime,
+        source.ErrorCount,
+        source.FeedCount,
+        source.UptimePercent,
+        source.AvgResponseTime,
+        source.Name,
+    )
+
+    if err != nil {
+        return fmt.Errorf("failed to update source stats: %v", err)
+    }
+
+    return nil
 }
 
-// GetTrendingTopics gets trending topics from recent articles
-func GetTrendingTopics(hours int) ([]struct{ Topic string; Count int }, error) {
-	query := `
-		SELECT 
-			topic_name, SUM(mention_count) as total_mentions
-		FROM 
-			topic_mentions
-		JOIN 
-			articles ON topic_mentions.article_id = articles.id
-		WHERE 
-			mentioned_at > ?
-		GROUP BY 
-			topic_name
-		ORDER BY 
-			total_mentions DESC
-		LIMIT 10
-	`
-	
-	since := time.Now().Add(-time.Duration(hours) * time.Hour)
-	rows, err := db.Query(query, since)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	
-	var topics []struct{ Topic string; Count int }
-	for rows.Next() {
-		var topic struct{ Topic string; Count int }
-		
-		err := rows.Scan(&topic.Topic, &topic.Count)
-		if err != nil {
-			return nil, err
-		}
-		
-		topics = append(topics, topic)
-	}
-	
-	if err = rows.Err(); err != nil {
-		return nil, err
-	}
-	
-	return topics, nil
-}
+// cleanupOldData removes old data from the database
+func cleanupOldData(retention time.Duration) error {
+    if !cfg.EnableDatabase || db == nil {
+        return ErrDatabaseNotInitialized
+    }
 
-// SaveUserPreference saves a user preference
-func SaveUserPreference(userID, prefType, value string) error {
-	query := `
-		INSERT INTO user_preferences (user_id, ` + prefType + `)
-		VALUES (?, ?)
-		ON CONFLICT(user_id) DO UPDATE SET ` + prefType + ` = ?
-	`
-	
-	_, err := db.Exec(query, userID, value, value)
-	return err
-}
+    ctx, cancel := context.WithTimeout(context.Background(), defaultQueryTimeout)
+    defer cancel()
 
-// GetUserPreference gets a user preference
-func GetUserPreference(userID, prefType string) (string, error) {
-	query := `SELECT ` + prefType + ` FROM user_preferences WHERE user_id = ?`
-	
-	var value string
-	err := db.QueryRow(query, userID).Scan(&value)
-	if err == sql.ErrNoRows {
-		return "", nil // No preference set
-	}
-	
-	return value, err
-}
+    cutoff := time.Now().Add(-retention)
 
-// updateDailyAnalytics updates analytics for today
-func updateDailyAnalytics(metric string, increment int) error {
-	if db == nil {
-		return nil // No database
-	}
-	
-	date := time.Now().Format("2006-01-02")
-	query := `
-		INSERT INTO analytics (date, ` + metric + `)
-		VALUES (?, ?)
-		ON CONFLICT(date) DO UPDATE SET ` + metric + ` = ` + metric + ` + ?
-	`
-	
-	_, err := db.Exec(query, date, increment, increment)
-	return err
-}
+    queries := []string{
+        "DELETE FROM articles WHERE timestamp < $1",
+        "DELETE FROM metrics WHERE timestamp < $1",
+    }
 
-// GetAnalytics gets analytics for a date range
-func GetAnalytics(startDate, endDate time.Time) (map[string]map[string]int, error) {
-	query := `
-		SELECT 
-			date, 
-			articles_processed, 
-			messages_sent,
-			api_calls, 
-			errors
-		FROM 
-			analytics
-		WHERE 
-			date BETWEEN ? AND ?
-		ORDER BY 
-			date
-	`
-	
-	rows, err := db.Query(query, 
-		startDate.Format("2006-01-02"), 
-		endDate.Format("2006-01-02"))
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	
-	result := make(map[string]map[string]int)
-	
-	for rows.Next() {
-		var date string
-		var articlesProcessed, messagesSent, apiCalls, errors int
-		
-		err := rows.Scan(&date, &articlesProcessed, &messagesSent, &apiCalls, &errors)
-		if err != nil {
-			return nil, err
-		}
-		
-		result[date] = map[string]int{
-			"articles_processed": articlesProcessed,
-			"messages_sent":     messagesSent,
-			"api_calls":         apiCalls,
-			"errors":           errors,
-		}
-	}
-	
-	if err = rows.Err(); err != nil {
-		return nil, err
-	}
-	
-	return result, nil
+    tx, err := db.BeginTx(ctx, nil)
+    if err != nil {
+        return fmt.Errorf("failed to begin transaction: %v", err)
+    }
+
+    for _, query := range queries {
+        if _, err := tx.ExecContext(ctx, query, cutoff); err != nil {
+            tx.Rollback()
+            return fmt.Errorf("failed to cleanup old data: %v", err)
+        }
+    }
+
+    return tx.Commit()
 }
