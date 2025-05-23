@@ -1,4 +1,3 @@
-
 package main
 
 import (
@@ -7,6 +6,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/bwmarrin/discordgo"
 )
 
 // ErrorRecord represents a single error record
