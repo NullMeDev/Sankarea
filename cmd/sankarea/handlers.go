@@ -2,11 +2,18 @@
 package main
 
 import (
+    "context"
     "fmt"
+    "runtime"
     "strings"
     "time"
 
     "github.com/bwmarrin/discordgo"
+)
+
+var (
+    buildDate = "2025-05-23"
+    buildTime = "05:30:55"
 )
 
 // handlePingCommand handles the /ping command
@@ -95,6 +102,8 @@ func handleStatusCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 
 // handleVersionCommand handles the /version command
 func handleVersionCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
+    buildDateTime := fmt.Sprintf("%s %s UTC", buildDate, buildTime)
+    
     s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
         Type: discordgo.InteractionResponseChannelMessageWithSource,
         Data: &discordgo.InteractionResponseData{
@@ -108,13 +117,13 @@ func handleVersionCommand(s *discordgo.Session, i *discordgo.InteractionCreate) 
                             Inline: true,
                         },
                         {
-                            Name:   "Last Updated",
-                            Value:  "2025-05-23",
+                            Name:   "Build Time",
+                            Value:  buildDateTime,
                             Inline: true,
                         },
                         {
                             Name:   "Go Version",
-                            Value:  "1.21+",
+                            Value:  runtime.Version(),
                             Inline: true,
                         },
                     },
@@ -206,15 +215,12 @@ func handleSourceAdd(s *discordgo.Session, i *discordgo.InteractionCreate, optio
     })
 }
 
-// Additional command handlers and helper functions...
-
+// handleSourceList handles the /source list subcommand
 func handleSourceList(s *discordgo.Session, i *discordgo.InteractionCreate) {
-    // Acknowledge interaction
     s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
         Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
     })
 
-    // Load sources
     sources, err := LoadSources()
     if err != nil {
         followupWithError(s, i, "Failed to load sources")
@@ -243,9 +249,107 @@ func handleSourceList(s *discordgo.Session, i *discordgo.InteractionCreate) {
         sb.WriteString("\n")
     }
 
-    // Send response
     s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
         Content: sb.String(),
+    })
+}
+
+// handleSourceRemove handles the /source remove subcommand
+func handleSourceRemove(s *discordgo.Session, i *discordgo.InteractionCreate, options []*discordgo.ApplicationCommandInteractionDataOption) {
+    s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+        Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+    })
+
+    name := getOptionString(options, "name")
+    if name == "" {
+        followupWithError(s, i, "Please provide a source name")
+        return
+    }
+
+    sources, err := LoadSources()
+    if err != nil {
+        followupWithError(s, i, "Failed to load sources")
+        return
+    }
+
+    // Find and remove source
+    found := false
+    for idx, source := range sources {
+        if strings.EqualFold(source.Name, name) {
+            sources = append(sources[:idx], sources[idx+1:]...)
+            found = true
+            break
+        }
+    }
+
+    if !found {
+        followupWithError(s, i, "Source not found")
+        return
+    }
+
+    if err := SaveSources(sources); err != nil {
+        followupWithError(s, i, "Failed to save sources")
+        return
+    }
+
+    s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+        Content: fmt.Sprintf("✅ Removed source **%s**", name),
+    })
+}
+
+// handleSourceUpdate handles the /source update subcommand
+func handleSourceUpdate(s *discordgo.Session, i *discordgo.InteractionCreate, options []*discordgo.ApplicationCommandInteractionDataOption) {
+    s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+        Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+    })
+
+    name := getOptionString(options, "name")
+    if name == "" {
+        followupWithError(s, i, "Please provide a source name")
+        return
+    }
+
+    sources, err := LoadSources()
+    if err != nil {
+        followupWithError(s, i, "Failed to load sources")
+        return
+    }
+
+    // Find and update source
+    found := false
+    for idx := range sources {
+        if strings.EqualFold(sources[idx].Name, name) {
+            // Update fields if provided
+            if url := getOptionString(options, "url"); url != "" {
+                if err := validateSourceURL(url); err != nil {
+                    followupWithError(s, i, fmt.Sprintf("Invalid URL: %v", err))
+                    return
+                }
+                sources[idx].URL = url
+            }
+            if category := getOptionString(options, "category"); category != "" {
+                sources[idx].Category = category
+            }
+            if paused, ok := getOptionBoolValue(options, "paused"); ok {
+                sources[idx].Paused = paused
+            }
+            found = true
+            break
+        }
+    }
+
+    if !found {
+        followupWithError(s, i, "Source not found")
+        return
+    }
+
+    if err := SaveSources(sources); err != nil {
+        followupWithError(s, i, "Failed to save sources")
+        return
+    }
+
+    s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+        Content: fmt.Sprintf("✅ Updated source **%s**", name),
     })
 }
 
@@ -267,6 +371,15 @@ func getOptionBool(options []*discordgo.ApplicationCommandInteractionDataOption,
         }
     }
     return false
+}
+
+func getOptionBoolValue(options []*discordgo.ApplicationCommandInteractionDataOption, name string) (bool, bool) {
+    for _, opt := range options {
+        if opt.Name == name {
+            return opt.BoolValue(), true
+        }
+    }
+    return false, false
 }
 
 func followupWithError(s *discordgo.Session, i *discordgo.InteractionCreate, message string) {
@@ -322,4 +435,11 @@ func countActiveSources(sources []NewsSource) int {
         }
     }
     return count
+}
+
+func validateSourceURL(url string) error {
+    if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+        return fmt.Errorf("URL must start with http:// or https://")
+    }
+    return nil
 }
