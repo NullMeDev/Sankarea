@@ -198,4 +198,4 @@ func handleStatusCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	statusMessage.WriteString("**Sankarea Bot Status**\n\n")
 	statusMessage.WriteString(fmt.Sprintf("📊 **General**\n"))
 	statusMessage.WriteString(fmt.Sprintf("• Version: %s\n", cfg.Version))
-	statusMessage.WriteString(fmt.Sprintf("• Uptime: %s\n", FormatDuration(time.Since(state.Start
+	statusMessage.WriteString(fmt.Sprintf("• Uptime: %s\n", FormatDuration(time.Since(state.StartupTime))))
