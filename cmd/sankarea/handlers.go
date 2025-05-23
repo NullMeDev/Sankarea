@@ -1,209 +1,325 @@
+// cmd/sankarea/handlers.go
 package main
 
 import (
-	"fmt"
-	"strconv"
-	"strings"
-	"time"
+    "fmt"
+    "strings"
+    "time"
 
-	"github.com/bwmarrin/discordgo"
+    "github.com/bwmarrin/discordgo"
 )
 
-// handleInteraction processes Discord slash commands
-func handleInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	if i.Type != discordgo.InteractionApplicationCommand {
-		return
-	}
-
-	// Check permissions
-	if !CheckCommandPermissions(s, i) {
-		respondWithError(s, i, "You don't have permission to use this command")
-		return
-	}
-
-	// Handle commands
-	switch i.ApplicationCommandData().Name {
-	case "ping":
-		handlePingCommand(s, i)
-	case "status":
-		handleStatusCommand(s, i)
-	case "version":
-		handleVersionCommand(s, i)
-	case "source":
-		handleSourceCommand(s, i)
-	case "admin":
-		handleAdminCommand(s, i)
-	case "factcheck":
-		handleFactCheckCommand(s, i)
-	case "summarize":
-		handleSummarizeCommand(s, i)
-	case "help":
-		handleHelpCommand(s, i)
-	case "filter":
-		handleFilterCommand(s, i)
-	case "digest":
-		handleDigestCommand(s, i)
-	case "track":
-		handleTrackCommand(s, i)
-	case "language":
-		handleLanguageCommand(s, i)
-	default:
-		respondWithError(s, i, "Unknown command")
-	}
-}
-
-// CheckCommandPermissions checks if the user has permission to use the command
-func CheckCommandPermissions(s *discordgo.Session, i *discordgo.InteractionCreate) bool {
-	// Allow all basic commands
-	switch i.ApplicationCommandData().Name {
-	case "ping", "status", "version", "help":
-		return true
-	}
-
-	// For admin commands, check if user is admin
-	if i.ApplicationCommandData().Name == "admin" {
-		return IsAdmin(i.Member.User.ID)
-	}
-
-	// Allow all other commands by default
-	return true
-}
-
-// getOptionString gets a string option from the options array
-func getOptionString(options []*discordgo.ApplicationCommandInteractionDataOption, name string) string {
-	for _, opt := range options {
-		if opt.Name == name {
-			switch opt.Type {
-			case discordgo.ApplicationCommandOptionString:
-				return opt.StringValue()
-			}
-		}
-	}
-	return ""
-}
-
-// getOptionInt gets an integer option from the options array
-func getOptionInt(options []*discordgo.ApplicationCommandInteractionDataOption, name string) int64 {
-	for _, opt := range options {
-		if opt.Name == name {
-			switch opt.Type {
-			case discordgo.ApplicationCommandOptionInteger:
-				return opt.IntValue()
-			}
-		}
-	}
-	return 0
-}
-
-// getOptionBool gets a boolean option from the options array
-func getOptionBool(options []*discordgo.ApplicationCommandInteractionDataOption, name string) bool {
-	for _, opt := range options {
-		if opt.Name == name {
-			switch opt.Type {
-			case discordgo.ApplicationCommandOptionBoolean:
-				return opt.BoolValue()
-			}
-		}
-	}
-	return false
-}
-
-// hasOption checks if an option exists in the options array
-func hasOption(options []*discordgo.ApplicationCommandInteractionDataOption, name string) bool {
-	for _, opt := range options {
-		if opt.Name == name {
-			return true
-		}
-	}
-	return false
-}
-
-// respondWithError responds to an interaction with an error message
-func respondWithError(s *discordgo.Session, i *discordgo.InteractionCreate, message string) {
-	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{
-			Content: "⚠️ " + message,
-		},
-	})
-}
-
-// followupWithError sends a followup message with an error
-func followupWithError(s *discordgo.Session, i *discordgo.InteractionCreate, message string) {
-	s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
-		Content: "⚠️ " + message,
-	})
-}
-
-// stringPtr returns a pointer to a string
-func stringPtr(s string) *string {
-	return &s
-}
-
-// handlePingCommand responds with latency and uptime
+// handlePingCommand handles the /ping command
 func handlePingCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	startTime := time.Now()
+    startTime := time.Now()
+    
+    // Send initial response
+    err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+        Type: discordgo.InteractionResponseChannelMessageWithSource,
+        Data: &discordgo.InteractionResponseData{
+            Content: "🏓 Pinging...",
+        },
+    })
+    if err != nil {
+        Logger().Printf("Error responding to ping: %v", err)
+        return
+    }
 
-	state, err := LoadState()
-	if err != nil {
-		respondWithError(s, i, "Failed to load state")
-		return
-	}
+    // Calculate latency
+    latency := time.Since(startTime).Milliseconds()
 
-	uptime := time.Since(state.StartupTime).Round(time.Second)
-
-	// Respond with latency
-	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{
-			Content: fmt.Sprintf("🏓 Pong! Latency: %dms | Uptime: %s",
-				time.Since(startTime).Milliseconds(),
-				FormatDuration(uptime),
-			),
-		},
-	})
+    // Update message with latency
+    _, err = s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+        Content: fmt.Sprintf("🏓 Pong! Latency: %dms", latency),
+    })
+    if err != nil {
+        Logger().Printf("Error updating ping response: %v", err)
+    }
 }
 
-// handleStatusCommand shows the current status of the bot
+// handleStatusCommand handles the /status command
 func handleStatusCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	// Acknowledge the interaction first (gives us time to gather data)
-	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
-	})
+    // Acknowledge interaction
+    s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+        Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+    })
 
-	// Load data
-	sources, err := LoadSources()
-	if err != nil {
-		followupWithError(s, i, "Failed to load sources")
-		return
-	}
+    // Load state and sources
+    state, err := LoadState()
+    if err != nil {
+        followupWithError(s, i, "Failed to load state")
+        return
+    }
 
-	state, err := LoadState()
-	if err != nil {
-		followupWithError(s, i, "Failed to load state")
-		return
-	}
+    sources, err := LoadSources()
+    if err != nil {
+        followupWithError(s, i, "Failed to load sources")
+        return
+    }
 
-	// Count active sources and articles
-	activeSources := 0
-	totalArticles := state.TotalArticles
-	for _, src := range sources {
-		if !src.Paused {
-			activeSources++
-		}
-	}
+    // Build status message
+    var sb strings.Builder
+    sb.WriteString("**Sankarea Bot Status**\n\n")
 
-	// Build status message
-	var statusMessage strings.Builder
-	statusMessage.WriteString("**Sankarea Bot Status**\n\n")
-	statusMessage.WriteString(fmt.Sprintf("📊 **General**\n"))
-	statusMessage.WriteString(fmt.Sprintf("• Version: %s\n", cfg.Version))
-	statusMessage.WriteString(fmt.Sprintf("• Uptime: %s\n", FormatDuration(time.Since(state.StartupTime))))
-	statusMessage.WriteString(fmt.Sprintf("• Active Sources: %d\n", activeSources))
-	statusMessage.WriteString(fmt.Sprintf("• Total Articles: %d\n", totalArticles))
+    // General stats
+    sb.WriteString("📊 **General**\n")
+    sb.WriteString(fmt.Sprintf("• Uptime: %s\n", formatDuration(time.Since(state.StartupTime))))
+    sb.WriteString(fmt.Sprintf("• Version: v%s\n", botVersion))
+    sb.WriteString(fmt.Sprintf("• Health: %s\n", getHealthEmoji(state.HealthStatus)))
+    sb.WriteString("\n")
 
-	// Send the status message
-	s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
-		Content: statusMessage.String(),
-	})
+    // News stats
+    sb.WriteString("📰 **News**\n")
+    sb.WriteString(fmt.Sprintf("• Active Sources: %d/%d\n", countActiveSources(sources), len(sources)))
+    sb.WriteString(fmt.Sprintf("• Articles Fetched: %d\n", state.ArticleCount))
+    sb.WriteString(fmt.Sprintf("• Last Fetch: %s\n", formatTimeAgo(state.LastFetchTime)))
+    sb.WriteString(fmt.Sprintf("• Fetch Interval: %d minutes\n", cfg.NewsIntervalMinutes))
+    sb.WriteString("\n")
+
+    // Error stats
+    sb.WriteString("⚠️ **Errors**\n")
+    sb.WriteString(fmt.Sprintf("• Error Count: %d\n", state.ErrorCount))
+    if state.LastError != "" {
+        sb.WriteString(fmt.Sprintf("• Last Error: %s (%s ago)\n", 
+            state.LastError, formatTimeAgo(state.LastErrorTime)))
+    }
+
+    // Send status message
+    _, err = s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+        Content: sb.String(),
+    })
+    if err != nil {
+        Logger().Printf("Error sending status response: %v", err)
+    }
+}
+
+// handleVersionCommand handles the /version command
+func handleVersionCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
+    s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+        Type: discordgo.InteractionResponseChannelMessageWithSource,
+        Data: &discordgo.InteractionResponseData{
+            Embeds: []*discordgo.MessageEmbed{
+                {
+                    Title: "Bot Version Information",
+                    Fields: []*discordgo.MessageEmbedField{
+                        {
+                            Name:   "Version",
+                            Value:  fmt.Sprintf("v%s", botVersion),
+                            Inline: true,
+                        },
+                        {
+                            Name:   "Last Updated",
+                            Value:  "2025-05-23",
+                            Inline: true,
+                        },
+                        {
+                            Name:   "Go Version",
+                            Value:  "1.21+",
+                            Inline: true,
+                        },
+                    },
+                    Footer: &discordgo.MessageEmbedFooter{
+                        Text: "Developed by NullMeDev",
+                    },
+                },
+            },
+        },
+    })
+}
+
+// handleSourceCommand handles the /source command and its subcommands
+func handleSourceCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
+    options := i.ApplicationCommandData().Options
+    if len(options) == 0 {
+        respondWithError(s, i, "Invalid source command")
+        return
+    }
+
+    switch options[0].Name {
+    case "add":
+        handleSourceAdd(s, i, options[0].Options)
+    case "remove":
+        handleSourceRemove(s, i, options[0].Options)
+    case "list":
+        handleSourceList(s, i)
+    case "update":
+        handleSourceUpdate(s, i, options[0].Options)
+    default:
+        respondWithError(s, i, "Unknown source subcommand")
+    }
+}
+
+// handleSourceAdd handles the /source add subcommand
+func handleSourceAdd(s *discordgo.Session, i *discordgo.InteractionCreate, options []*discordgo.ApplicationCommandInteractionDataOption) {
+    // Acknowledge interaction
+    s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+        Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+    })
+
+    // Get parameters
+    name := getOptionString(options, "name")
+    url := getOptionString(options, "url")
+    category := getOptionString(options, "category")
+    factCheck := getOptionBool(options, "fact_check")
+
+    // Validate source
+    if err := validateSourceURL(url); err != nil {
+        followupWithError(s, i, fmt.Sprintf("Invalid source URL: %v", err))
+        return
+    }
+
+    // Create new source
+    source := NewsSource{
+        Name:      name,
+        URL:       url,
+        Category:  category,
+        FactCheck: factCheck,
+        Added:     time.Now(),
+        AddedBy:   i.Member.User.ID,
+    }
+
+    // Add source
+    sources, err := LoadSources()
+    if err != nil {
+        followupWithError(s, i, "Failed to load sources")
+        return
+    }
+
+    // Check for duplicate
+    for _, s := range sources {
+        if strings.EqualFold(s.Name, name) {
+            followupWithError(s, i, "A source with this name already exists")
+            return
+        }
+    }
+
+    // Add and save
+    sources = append(sources, source)
+    if err := SaveSources(sources); err != nil {
+        followupWithError(s, i, "Failed to save sources")
+        return
+    }
+
+    // Send success message
+    s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+        Content: fmt.Sprintf("✅ Added source **%s** in category **%s**", name, category),
+    })
+}
+
+// Additional command handlers and helper functions...
+
+func handleSourceList(s *discordgo.Session, i *discordgo.InteractionCreate) {
+    // Acknowledge interaction
+    s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+        Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+    })
+
+    // Load sources
+    sources, err := LoadSources()
+    if err != nil {
+        followupWithError(s, i, "Failed to load sources")
+        return
+    }
+
+    // Group sources by category
+    categoryMap := make(map[string][]NewsSource)
+    for _, source := range sources {
+        categoryMap[source.Category] = append(categoryMap[source.Category], source)
+    }
+
+    // Build response
+    var sb strings.Builder
+    sb.WriteString("**📰 News Sources**\n\n")
+
+    for category, sources := range categoryMap {
+        sb.WriteString(fmt.Sprintf("**%s**\n", category))
+        for _, source := range sources {
+            status := "✅"
+            if source.Paused {
+                status = "⏸️"
+            }
+            sb.WriteString(fmt.Sprintf("%s %s - %s\n", status, source.Name, source.URL))
+        }
+        sb.WriteString("\n")
+    }
+
+    // Send response
+    s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+        Content: sb.String(),
+    })
+}
+
+// Helper functions
+
+func getOptionString(options []*discordgo.ApplicationCommandInteractionDataOption, name string) string {
+    for _, opt := range options {
+        if opt.Name == name {
+            return opt.StringValue()
+        }
+    }
+    return ""
+}
+
+func getOptionBool(options []*discordgo.ApplicationCommandInteractionDataOption, name string) bool {
+    for _, opt := range options {
+        if opt.Name == name {
+            return opt.BoolValue()
+        }
+    }
+    return false
+}
+
+func followupWithError(s *discordgo.Session, i *discordgo.InteractionCreate, message string) {
+    s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+        Content: "❌ " + message,
+    })
+}
+
+func formatDuration(d time.Duration) string {
+    d = d.Round(time.Second)
+    h := d / time.Hour
+    d -= h * time.Hour
+    m := d / time.Minute
+    d -= m * time.Minute
+    s := d / time.Second
+    return fmt.Sprintf("%02d:%02d:%02d", h, m, s)
+}
+
+func formatTimeAgo(t time.Time) string {
+    if t.IsZero() {
+        return "never"
+    }
+    
+    d := time.Since(t)
+    switch {
+    case d < time.Minute:
+        return "just now"
+    case d < time.Hour:
+        return fmt.Sprintf("%d minutes ago", int(d.Minutes()))
+    case d < 24*time.Hour:
+        return fmt.Sprintf("%d hours ago", int(d.Hours()))
+    default:
+        return fmt.Sprintf("%d days ago", int(d.Hours()/24))
+    }
+}
+
+func getHealthEmoji(status string) string {
+    switch status {
+    case StatusOK:
+        return "🟢 Healthy"
+    case StatusDegraded:
+        return "🟡 Degraded"
+    default:
+        return "🔴 Unhealthy"
+    }
+}
+
+func countActiveSources(sources []NewsSource) int {
+    count := 0
+    for _, source := range sources {
+        if !source.Paused {
+            count++
+        }
+    }
+    return count
 }
