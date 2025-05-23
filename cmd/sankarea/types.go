@@ -1,124 +1,82 @@
 package main
 
 import (
-	"fmt"
-	"log"
 	"net/http"
-	"os"
-	"path/filepath"
-	"strings"
 	"sync"
 	"time"
-	
-	"github.com/bwmarrin/discordgo"
-	"github.com/robfig/cron/v3"
 )
 
-// Error severity levels
-const (
-	ErrorSeverityLow    = 1
-	ErrorSeverityMedium = 2
-	ErrorSeverityHigh   = 3
-	ErrorSeverityFatal  = 4
-)
-
-// ErrorSystem handles error tracking and reporting
-type ErrorSystem struct {
-	errors      []ErrorRecord
-	maxRecords  int
-	errorsMutex sync.Mutex
+// Source represents a news source
+type Source struct {
+	Name            string    `json:"name" yaml:"name"`
+	URL             string    `json:"url" yaml:"url"`
+	Category        string    `json:"category" yaml:"category"`
+	Description     string    `json:"description" yaml:"description"`
+	Bias           string     `json:"bias" yaml:"bias"`
+	TrustScore     float64    `json:"trustScore" yaml:"trustScore"`
+	ChannelOverride string    `json:"channelOverride" yaml:"channelOverride"`
+	Paused         bool       `json:"paused" yaml:"paused"`
+	Active         bool       `json:"active" yaml:"active"`
+	Tags           []string   `json:"tags" yaml:"tags"`
+	LastFetched    time.Time  `json:"lastFetched" yaml:"lastFetched"`
+	LastError      string     `json:"lastError" yaml:"lastError"`
+	LastErrorTime  time.Time  `json:"lastErrorTime" yaml:"lastErrorTime"`
+	ErrorCount     int        `json:"errorCount" yaml:"errorCount"`
+	FeedCount      int        `json:"feedCount" yaml:"feedCount"`
+	UptimePercent  float64    `json:"uptimePercent" yaml:"uptimePercent"`
+	AvgResponseTime int64     `json:"avgResponseTime" yaml:"avgResponseTime"`
 }
 
-// ErrorRecord represents a single error occurrence
-type ErrorRecord struct {
-	Message   string    `json:"message"`
-	Error     string    `json:"error"`
-	Component string    `json:"component"`
-	Severity  int       `json:"severity"`
-	Time      time.Time `json:"time"`
+// Config represents the application configuration
+type Config struct {
+	Version              string   `json:"version"`
+	BotToken             string   `json:"botToken"`
+	AppID                string   `json:"appId"`
+	GuildID              string   `json:"guildId"`
+	OwnerIDs             []string `json:"ownerIds"`
+	NewsChannelID        string   `json:"newsChannelId"`
+	ErrorChannelID       string   `json:"errorChannelId"`
+	NewsIntervalMinutes  int      `json:"newsIntervalMinutes"`
+	News15MinCron        string   `json:"news15MinCron"`
+	DigestCronSchedule   string   `json:"digestCronSchedule"`
+	MaxPostsPerSource    int      `json:"maxPostsPerSource"`
+	EnableImageEmbed     bool     `json:"enableImageEmbed"`
+	EnableFactCheck      bool     `json:"enableFactCheck"`
+	EnableSummarization  bool     `json:"enableSummarization"`
+	EnableContentFiltering bool   `json:"enableContentFiltering"`
+	EnableKeywordTracking bool    `json:"enableKeywordTracking"`
+	EnableDatabase       bool     `json:"enableDatabase"`
+	EnableDashboard      bool     `json:"enableDashboard"`
+	DashboardPort        int      `json:"dashboardPort"`
+	HealthAPIPort        int      `json:"healthApiPort"`
+	UserAgentString      string   `json:"userAgentString"`
+	FetchNewsOnStartup   bool     `json:"fetchNewsOnStartup"`
+	GoogleFactCheckAPIKey string  `json:"googleFactCheckApiKey"`
+	ClaimBustersAPIKey    string  `json:"claimBustersApiKey"`
 }
 
-// NewErrorSystem creates a new error tracking system
-func NewErrorSystem(maxRecords int) *ErrorSystem {
-	return &ErrorSystem{
-		errors:     make([]ErrorRecord, 0, maxRecords),
-		maxRecords: maxRecords,
-	}
-}
-
-// HandleError records and handles an error based on its severity
-func (es *ErrorSystem) HandleError(message string, err error, component string, severity int) {
-	if es == nil {
-		// In case the error system itself is nil, log to stderr
-		log.Printf("ERROR SYSTEM NOT INITIALIZED: %s: %v", message, err)
-		if severity == ErrorSeverityFatal {
-			log.Fatal(fmt.Sprintf("FATAL ERROR: %s: %v", message, err))
-		}
-		return
-	}
-
-	es.errorsMutex.Lock()
-	defer es.errorsMutex.Unlock()
-
-	errorMsg := "unknown error"
-	if err != nil {
-		errorMsg = err.Error()
-	}
-
-	// Create error record
-	record := ErrorRecord{
-		Message:   message,
-		Error:     errorMsg,
-		Component: component,
-		Severity:  severity,
-		Time:      time.Now(),
-	}
-
-	// Add to records
-	es.errors = append(es.errors, record)
-	if len(es.errors) > es.maxRecords {
-		// Remove oldest error
-		es.errors = es.errors[1:]
-	}
-
-	// Log the error
-	Logger().Printf("[%s] %s: %v", severityString(severity), message, err)
-
-	// Increment error count in global state
-	IncrementErrorCount()
-	RecordError(message + ": " + errorMsg)
-
-	// Handle fatal errors by exiting the application
-	if severity == ErrorSeverityFatal {
-		Logger().Fatalf("FATAL ERROR: %s: %v", message, err)
-	}
-}
-
-// GetErrors returns the recorded errors
-func (es *ErrorSystem) GetErrors() []ErrorRecord {
-	es.errorsMutex.Lock()
-	defer es.errorsMutex.Unlock()
-
-	// Return a copy to avoid race conditions
-	result := make([]ErrorRecord, len(es.errors))
-	copy(result, es.errors)
-	return result
-}
-
-// severityString converts severity level to string representation
-func severityString(severity int) string {
-	switch severity {
-	case ErrorSeverityLow:
-		return "LOW"
-	case ErrorSeverityMedium:
-		return "MEDIUM"
-	case ErrorSeverityHigh:
-		return "HIGH"
-	case ErrorSeverityFatal:
-		return "FATAL"
-	default:
-		return "UNKNOWN"
-	}
+// State represents the application state
+type State struct {
+	Paused         bool      `json:"paused"`
+	PausedBy       string    `json:"pausedBy"`
+	LastFetchTime  time.Time `json:"lastFetchTime"`
+	LastDigest     time.Time `json:"lastDigest"`
+	NewsNextTime   time.Time `json:"newsNextTime"`
+	DigestNextTime time.Time `json:"digestNextTime"`
+	StartupTime    time.Time `json:"startupTime"`
+	ShutdownTime   time.Time `json:"shutdownTime"`
+	Version        string    `json:"version"`
+	FeedCount      int       `json:"feedCount"`
+	DigestCount    int       `json:"digestCount"`
+	ErrorCount     int       `json:"errorCount"`
+	TotalArticles  int       `json:"totalArticles"`
+	TotalErrors    int       `json:"totalErrors"`
+	TotalAPICalls  int       `json:"totalApiCalls"`
+	LastError      string    `json:"lastError"`
+	LastErrorTime  time.Time `json:"lastErrorTime"`
+	LastInterval   int       `json:"lastInterval"`
+	Lockdown       bool      `json:"lockdown"`
+	LockdownSetBy  string    `json:"lockdownSetBy"`
 }
 
 // ImageDownloader handles downloading and caching images from feeds
@@ -143,245 +101,251 @@ func (id *ImageDownloader) Initialize() error {
 	return os.MkdirAll(id.cacheDir, 0755)
 }
 
-// UserFilterManager handles user preferences for filtering news
+// UserFilterManager handles user-specific news filtering
 type UserFilterManager struct {
-	filters     map[string]*UserFilter
-	filtersDir  string
-	filterMutex sync.Mutex
+	filterDir string
+	filters   map[string]*UserFilter
+	mutex     sync.RWMutex
 }
 
-// UserFilter represents a user's filtering preferences
+// UserFilter represents a user's news filtering preferences
 type UserFilter struct {
-	UserID         string   `json:"userId"`
-	DisabledSources []string `json:"disabledSources"`
-	DisabledCategories []string `json:"disabledCategories"`
-	IncludeKeywords []string `json:"includeKeywords"`
-	ExcludeKeywords []string `json:"excludeKeywords"`
-	LastUpdated    time.Time `json:"lastUpdated"`
+	UserID           string            `json:"userId"`
+	DisabledSources  []string          `json:"disabledSources"`
+	DisabledCategories []string        `json:"disabledCategories"`
+	IncludeKeywords  []string          `json:"includeKeywords"`
+	ExcludeKeywords  []string          `json:"excludeKeywords"`
+	LastUpdated      time.Time         `json:"lastUpdated"`
 }
 
 // NewUserFilterManager creates a new user filter manager
 func NewUserFilterManager() *UserFilterManager {
 	return &UserFilterManager{
-		filters:    make(map[string]*UserFilter),
-		filtersDir: "data/user_filters",
+		filterDir: "data/user_filters",
+		filters:   make(map[string]*UserFilter),
 	}
 }
 
-// Initialize sets up the user filter manager
+// Initialize loads all user filters
 func (ufm *UserFilterManager) Initialize() error {
-	return os.MkdirAll(ufm.filtersDir, 0755)
+	return os.MkdirAll(ufm.filterDir, 0755)
 }
 
-// HealthMonitor monitors the health of the bot and its dependencies
+// HealthMonitor tracks system health
 type HealthMonitor struct {
-	lastCheck time.Time
-	status    map[string]bool
-	mutex     sync.Mutex
+	client *http.Client
+	ticker *time.Ticker
+	mutex  sync.Mutex
 }
 
 // NewHealthMonitor creates a new health monitor
 func NewHealthMonitor() *HealthMonitor {
 	return &HealthMonitor{
-		status: make(map[string]bool),
+		client: &http.Client{
+			Timeout: 10 * time.Second,
+		},
 	}
 }
 
-// StartPeriodicChecks starts periodic health checks
+// StartPeriodicChecks begins periodic health checks
 func (hm *HealthMonitor) StartPeriodicChecks(interval time.Duration) {
+	hm.ticker = time.NewTicker(interval)
 	go func() {
-		defer RecoverFromPanic("health-monitor")
-		
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		
-		for {
-			select {
-			case <-ticker.C:
-				hm.PerformHealthCheck()
-			}
+		for range hm.ticker.C {
+			hm.PerformChecks()
 		}
 	}()
 }
 
-// PerformHealthCheck runs a health check on all components
-func (hm *HealthMonitor) PerformHealthCheck() {
-	hm.mutex.Lock()
-	defer hm.mutex.Unlock()
-	
-	hm.lastCheck = time.Now()
-	
-	// Add health checks for various components here
-	// For now, just mark the bot as healthy
-	hm.status["bot"] = true
+// StopChecks stops the health check ticker
+func (hm *HealthMonitor) StopChecks() {
+	if hm.ticker != nil {
+		hm.ticker.Stop()
+	}
 }
 
-// KeywordTracker tracks keyword occurrences in news articles
+// PerformChecks runs health checks on various components
+func (hm *HealthMonitor) PerformChecks() {
+	// In a real implementation, this would check various system metrics
+	// and report issues to the error system
+}
+
+// KeywordTracker tracks news keywords
 type KeywordTracker struct {
-	keywords     map[string]KeywordStats
-	keywordsFile string
-	mutex        sync.Mutex
+	dataFile     string
+	keywords     map[string]*KeywordStats
+	mutex        sync.RWMutex
 }
 
-// KeywordStats represents statistics for a tracked keyword
+// KeywordStats tracks statistics for a keyword
 type KeywordStats struct {
-	Keyword     string    `json:"keyword"`
-	Count       int       `json:"count"`
-	FirstSeen   time.Time `json:"firstSeen"`
-	LastSeen    time.Time `json:"lastSeen"`
-	Sources     []string  `json:"sources"`
-	Categories  []string  `json:"categories"`
+	Keyword      string    `json:"keyword"`
+	Count        int       `json:"count"`
+	LastSeen     time.Time `json:"lastSeen"`
+	Sources      []string  `json:"sources"`
+	Categories   []string  `json:"categories"`
 }
 
 // NewKeywordTracker creates a new keyword tracker
 func NewKeywordTracker() *KeywordTracker {
 	return &KeywordTracker{
-		keywords:     make(map[string]KeywordStats),
-		keywordsFile: "data/keywords.json",
+		dataFile: "data/keywords.json",
+		keywords: make(map[string]*KeywordStats),
 	}
 }
 
-// Initialize sets up the keyword tracker
+// Initialize loads keyword tracking data
 func (kt *KeywordTracker) Initialize() error {
-	// Create the data directory if it doesn't exist
-	dir := filepath.Dir(kt.keywordsFile)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
-	
-	// Check if keywords file exists
-	if _, err := os.Stat(kt.keywordsFile); os.IsNotExist(err) {
-		// Create empty keywords file
-		return kt.Save()
-	}
-	
-	// Load existing keywords
-	data, err := os.ReadFile(kt.keywordsFile)
-	if err != nil {
-		return err
-	}
-	
-	if len(data) == 0 {
-		// File exists but is empty
-		return nil
-	}
-	
-	// Parse keywords
-	var keywords map[string]KeywordStats
-	if err := json.Unmarshal(data, &keywords); err != nil {
-		return err
-	}
-	
-	kt.keywords = keywords
+	// In a real implementation, this would load keywords from JSON
 	return nil
 }
 
-// Save persists the keywords to disk
+// Save persists keyword data
 func (kt *KeywordTracker) Save() error {
-	kt.mutex.Lock()
-	defer kt.mutex.Unlock()
-	
-	// Marshal keywords to JSON
-	data, err := json.MarshalIndent(kt.keywords, "", "  ")
-	if err != nil {
-		return err
-	}
-	
-	// Write to file atomically to prevent corruption
-	tempFile := kt.keywordsFile + ".tmp"
-	if err := os.WriteFile(tempFile, data, 0644); err != nil {
-		return err
-	}
-	
-	// Then rename to the actual file
-	return os.Rename(tempFile, kt.keywordsFile)
+	// In a real implementation, this would save keywords to JSON
+	return nil
 }
 
-// CheckForKeywords checks a text for tracked keywords
+// CheckForKeywords scans text for tracked keywords
 func (kt *KeywordTracker) CheckForKeywords(text string) {
-	kt.mutex.Lock()
-	defer kt.mutex.Unlock()
-	
-	// Simple implementation: just check if each keyword is in the text
-	lowerText := strings.ToLower(text)
-	
-	for keyword, stats := range kt.keywords {
-		if strings.Contains(lowerText, strings.ToLower(keyword)) {
-			// Update stats
-			stats.Count++
-			stats.LastSeen = time.Now()
-			if stats.FirstSeen.IsZero() {
-				stats.FirstSeen = time.Now()
-			}
-			kt.keywords[keyword] = stats
-		}
-	}
+	// In a real implementation, this would check for matches
 }
 
-// DigestManager handles creation and scheduling of news digests
+// DigestManager handles digest creation and scheduling
 type DigestManager struct {
-	scheduler *cron.Cron
-	settings  map[string]*DigestSettings
-}
-
-// DigestSettings represents a user's digest settings
-type DigestSettings struct {
-	UserID     string   `json:"userId"`
-	Enabled    bool     `json:"enabled"`
-	Schedule   string   `json:"schedule"`
-	MaxStories int      `json:"maxStories"`
-	Categories []string `json:"categories"`
+	cronSchedule  string
+	cronJob       cron.EntryID
+	mutex         sync.Mutex
 }
 
 // NewDigestManager creates a new digest manager
 func NewDigestManager() *DigestManager {
 	return &DigestManager{
-		scheduler: cron.New(),
-		settings:  make(map[string]*DigestSettings),
+		cronSchedule: "0 8 * * *", // Default to 8 AM daily
 	}
 }
 
 // StartScheduler starts the digest scheduler
-func (dm *DigestManager) StartScheduler(session *discordgo.Session) error {
-	// Start the scheduler
-	dm.scheduler.Start()
-	
-	// Schedule default digest if configured
-	if cfg != nil && cfg.DigestCronSchedule != "" {
-		_, err := dm.scheduler.AddFunc(cfg.DigestCronSchedule, func() {
-			if err := dm.GenerateDigest(session, cfg.DigestChannelID, nil); err != nil {
-				Logger().Printf("Error generating scheduled digest: %v", err)
-				if errorSystem != nil {
-					errorSystem.HandleError("Scheduled digest generation failed", err, "digest", ErrorSeverityMedium)
-				}
-			}
-		})
-		
-		if err != nil {
-			return fmt.Errorf("failed to schedule digest: %w", err)
-		}
-		
-		Logger().Printf("Scheduled digest generation with cron: %s", cfg.DigestCronSchedule)
-	}
-	
+func (dm *DigestManager) StartScheduler(s *discordgo.Session) error {
+	// In a real implementation, this would add a cron job
 	return nil
 }
 
-// GenerateDigest generates a news digest
-func (dm *DigestManager) GenerateDigest(session *discordgo.Session, channelID string, settings *DigestSettings) error {
-	// Basic implementation
-	sources, err := LoadSources()
-	if err != nil {
-		return fmt.Errorf("failed to load sources: %w", err)
+// LanguageManager handles translations
+type LanguageManager struct {
+	translations map[string]map[string]string
+	mutex        sync.RWMutex
+}
+
+// NewLanguageManager creates a new language manager
+func NewLanguageManager() *LanguageManager {
+	return &LanguageManager{
+		translations: make(map[string]map[string]string),
+	}
+}
+
+// Initialize loads translation data
+func (lm *LanguageManager) Initialize() error {
+	// In a real implementation, this would load translations
+	return nil
+}
+
+// CredibilityScorer scores news source credibility
+type CredibilityScorer struct {
+	scores map[string]float64
+	mutex  sync.RWMutex
+}
+
+// NewCredibilityScorer creates a new credibility scorer
+func NewCredibilityScorer() *CredibilityScorer {
+	return &CredibilityScorer{
+		scores: make(map[string]float64),
+	}
+}
+
+// Initialize loads credibility data
+func (cs *CredibilityScorer) Initialize() error {
+	// In a real implementation, this would load credibility data
+	return nil
+}
+
+// Save persists credibility scores
+func (cs *CredibilityScorer) Save() error {
+	// In a real implementation, this would save credibility data
+	return nil
+}
+
+// AnalyticsEngine tracks bot usage
+type AnalyticsEngine struct {
+	dataDir string
+	mutex   sync.Mutex
+}
+
+// NewAnalyticsEngine creates a new analytics engine
+func NewAnalyticsEngine() *AnalyticsEngine {
+	return &AnalyticsEngine{
+		dataDir: "data/analytics",
+	}
+}
+
+// Initialize sets up the analytics engine
+func (ae *AnalyticsEngine) Initialize() error {
+	return os.MkdirAll(ae.dataDir, 0755)
+}
+
+// Save persists analytics data
+func (ae *AnalyticsEngine) Save() error {
+	// In a real implementation, this would save analytics data
+	return nil
+}
+
+// ConfigManager handles automatic configuration reloading
+type ConfigManager struct {
+	configPath   string
+	interval     time.Duration
+	ticker       *time.Ticker
+	reloadFunc   func(*Config)
+	mutex        sync.Mutex
+}
+
+// NewConfigManager creates a new config manager
+func NewConfigManager(configPath string, interval time.Duration) (*ConfigManager, error) {
+	if interval < time.Second {
+		interval = time.Minute
 	}
 	
-	// Filter active sources
-	var activeSources []Source
-	for _, source := range sources {
-		if !source.Paused {
-			activeSources = append(activeSources, source)
+	return &ConfigManager{
+		configPath: configPath,
+		interval:   interval,
+	}, nil
+}
+
+// SetReloadHandler sets the function to call when config is reloaded
+func (cm *ConfigManager) SetReloadHandler(fn func(*Config)) {
+	cm.mutex.Lock()
+	defer cm.mutex.Unlock()
+	cm.reloadFunc = fn
+}
+
+// StartWatching begins watching the config file for changes
+func (cm *ConfigManager) StartWatching() {
+	cm.ticker = time.NewTicker(cm.interval)
+	go func() {
+		for range cm.ticker.C {
+			cm.checkConfigChanged()
 		}
+	}()
+}
+
+// StopWatching stops watching the config file
+func (cm *ConfigManager) StopWatching() {
+	if cm.ticker != nil {
+		cm.ticker.Stop()
 	}
-	
-	// Create digest message
-	
+}
+
+// checkConfigChanged checks if the config file has changed
+func (cm *ConfigManager) checkConfigChanged() {
+	// In a real implementation, this would check file modification time
+	// and reload the config if it has changed
+}
