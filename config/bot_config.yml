@@ -1,0 +1,48 @@
+# Discord Bot Configuration
+bot:
+  # Default command prefix
+  prefix: "!"
+  # Time between feed checks (in minutes)
+  check_interval: 30
+  # Maximum number of posts per feed check
+  max_posts_per_check: 5
+  # Enable detailed logging
+  debug_mode: false
+
+# Channel Configuration
+# Replace channel_ids with your actual Discord channel IDs
+category_channels:
+  Technology: ""  # Add your channel ID here
+  Business: ""    # Add your channel ID here
+  Science: ""     # Add your channel ID here
+  Health: ""      # Add your channel ID here
+  Politics: ""    # Add your channel ID here
+  Sports: ""      # Add your channel ID here
+  World: ""       # Add your channel ID here
+
+# Feed Processing Settings
+feeds:
+  # Maximum time to wait for feed response (in seconds)
+  timeout: 30
+  # Maximum concurrent feed fetches
+  max_concurrent: 5
+  # User agent for feed requests
+  user_agent: "Sankarea RSS Bot/1.0"
+
+# Post Formatting
+formatting:
+  # Include source name in posts
+  show_source: true
+  # Include publication date
+  show_date: true
+  # Maximum length for post description
+  max_description_length: 2000
+  # Embed color (hex)
+  embed_color: "0x7289DA"
+
+# Cache Settings
+cache:
+  # Time to keep entries in cache (in hours)
+  entry_lifetime: 24
+  # Maximum entries per feed
+  max_entries: 100
