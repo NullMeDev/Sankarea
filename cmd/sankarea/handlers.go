@@ -9,6 +9,49 @@ import (
 	"github.com/bwmarrin/discordgo"
 )
 
+// handleInteraction processes Discord slash commands
+func handleInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	if i.Type != discordgo.InteractionApplicationCommand {
+		return
+	}
+
+	// Check permissions
+	if !CheckCommandPermissions(s, i) {
+		respondWithError(s, i, "You don't have permission to use this command")
+		return
+	}
+
+	// Handle commands
+	switch i.ApplicationCommandData().Name {
+	case "ping":
+		handlePingCommand(s, i)
+	case "status":
+		handleStatusCommand(s, i)
+	case "version":
+		handleVersionCommand(s, i)
+	case "source":
+		handleSourceCommand(s, i)
+	case "admin":
+		handleAdminCommand(s, i)
+	case "factcheck":
+		handleFactCheckCommand(s, i)
+	case "summarize":
+		handleSummarizeCommand(s, i)
+	case "help":
+		handleHelpCommand(s, i)
+	case "filter":
+		handleFilterCommand(s, i)
+	case "digest":
+		handleDigestCommand(s, i)
+	case "track":
+		handleTrackCommand(s, i)
+	case "language":
+		handleLanguageCommand(s, i)
+	default:
+		respondWithError(s, i, "Unknown command")
+	}
+}
+
 // CheckCommandPermissions checks if the user has permission to use the command
 func CheckCommandPermissions(s *discordgo.Session, i *discordgo.InteractionCreate) bool {
 	// Allow all basic commands
@@ -97,118 +140,60 @@ func stringPtr(s string) *string {
 	return &s
 }
 
-// handleSourceCommand handles the /source command
-func handleSourceCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	// Get subcommand
-	options := i.ApplicationCommandData().Options
-	if len(options) == 0 {
-		respondWithError(s, i, "Missing subcommand")
+// handlePingCommand responds to the ping command
+func handlePingCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	startTime := time.Now()
+	
+	// Calculate uptime
+	state, err := LoadState()
+	if err != nil {
+		respondWithError(s, i, "Failed to load state")
 		return
 	}
-	
-	subcommand := options[0].Name
-	
-	switch subcommand {
-	case "list":
-		handleSourceList(s, i)
-	case "add":
-		handleSourceAdd(s, i, options[0])
-	case "remove":
-		handleSourceRemove(s, i, options[0])
-	case "info":
-		handleSourceInfo(s, i, options[0])
-	default:
-		respondWithError(s, i, "Unknown subcommand")
-	}
+
+	uptime := time.Since(state.StartupTime).Round(time.Second)
+
+	// Respond with latency
+	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Content: fmt.Sprintf("🏓 Pong! Latency: %dms | Uptime: %s", 
+				time.Since(startTime).Milliseconds(),
+				FormatDuration(uptime)),
+		},
+	})
 }
 
-// handleSourceList shows a list of all sources
-func handleSourceList(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	// Acknowledge the interaction first
+// handleStatusCommand shows the current status of the bot
+func handleStatusCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	// Acknowledge the interaction first (gives us time to gather data)
 	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
 	})
 
-	// Load sources
+	// Load data
 	sources, err := LoadSources()
 	if err != nil {
 		followupWithError(s, i, "Failed to load sources")
 		return
 	}
 
-	if len(sources) == 0 {
-		s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
-			Content: stringPtr("No news sources configured. Use `/source add` to add some."),
-		})
-		return
-	}
-
-	// Group sources by category
-	categories := make(map[string][]Source)
-	for _, source := range sources {
-		cat := source.Category
-		if cat == "" {
-			cat = "Uncategorized"
-		}
-		categories[cat] = append(categories[cat], source)
-	}
-
-	// Build embed
-	embed := &discordgo.MessageEmbed{
-		Title:       "News Sources",
-		Description: fmt.Sprintf("There are %d sources configured.", len(sources)),
-		Color:       0x3498DB, // Blue
-		Fields:      []*discordgo.MessageEmbedField{},
-	}
-
-	// Add categories as fields
-	for category, categorySources := range categories {
-		var sourceList strings.Builder
-		for _, source := range categorySources {
-			status := "✅"
-			if source.Paused {
-				status = "⏸️"
-			}
-			sourceList.WriteString(fmt.Sprintf("%s **%s**\n", status, source.Name))
-		}
-		
-		embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
-			Name:  category,
-			Value: sourceList.String(),
-		})
-	}
-
-	// Update with embed
-	s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
-		Embeds: &[]*discordgo.MessageEmbed{embed},
-	})
-}
-
-// handleSourceAdd adds a new news source
-func handleSourceAdd(s *discordgo.Session, i *discordgo.InteractionCreate, option *discordgo.ApplicationCommandInteractionDataOption) {
-	// Get options
-	name := getOptionString(option.Options, "name")
-	url := getOptionString(option.Options, "url")
-	category := getOptionString(option.Options, "category")
-	
-	// Validate
-	if name == "" || url == "" {
-		respondWithError(s, i, "Name and URL are required")
-		return
-	}
-	
-	// Acknowledge the interaction
-	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
-	})
-	
-	// Check if source already exists
-	sources, err := LoadSources()
+	state, err := LoadState()
 	if err != nil {
-		followupWithError(s, i, "Failed to load sources")
+		followupWithError(s, i, "Failed to load state")
 		return
 	}
-	
-	for _, source := range sources {
-		if source.Name == name {
-			followupWithError(s, i, fmt.Sprintf("
+
+	// Count active sources and articles
+	activeSources := 0
+	totalArticles := state.TotalArticles
+	for _, src := range sources {
+		if !src.Paused {
+			activeSources++
+		}
+	}
+
+	// Build status message
+	var statusMessage strings.Builder
+	statusMessage.WriteString("**Sankarea Bot Status**\n\n")
+	statusMessage.WriteString(fmt.Sprintf("📊 **
