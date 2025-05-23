@@ -2,8 +2,12 @@ package main
 
 import (
 	"net/http"
+	"os"
 	"sync"
 	"time"
+
+	"github.com/bwmarrin/discordgo"
+	"github.com/robfig/cron/v3"
 )
 
 // Source represents a news source
@@ -348,4 +352,22 @@ func (cm *ConfigManager) StopWatching() {
 func (cm *ConfigManager) checkConfigChanged() {
 	// In a real implementation, this would check file modification time
 	// and reload the config if it has changed
+}
+
+// StartHealthServer starts the health API server
+func StartHealthServer(port int) {
+	// In a real implementation, this would start an HTTP server
+	// for health checks and monitoring
+}
+
+// StartDashboard starts the web dashboard
+func StartDashboard() error {
+	// In a real implementation, this would start the web dashboard server
+	return nil
+}
+
+// InitDB initializes the database connection
+func InitDB() error {
+	// In a real implementation, this would initialize the database
+	return nil
 }
