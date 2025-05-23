@@ -21,7 +21,7 @@ func LoadState() (*State, error) {
 	if _, err := os.Stat(stateFilePath); os.IsNotExist(err) {
 		// Create default state
 		defaultState := &State{
-			Version:     "1.0.0",
+			Version:     VERSION,
 			StartupTime: time.Now(),
 		}
 		
