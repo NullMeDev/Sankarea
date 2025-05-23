@@ -5,15 +5,14 @@ import (
     "encoding/json"
     "fmt"
     "net/http"
-    "time"
-    "strings"
     "runtime"
-    
-    "github.com/bwmarrin/discordgo"
+    "strings"
+    "sync"
+    "time"
 )
 
-// respondWithError sends a JSON error response
-func respondWithError(w http.ResponseWriter, code int, message string) {
+// respondWithHTTPError sends a JSON error response
+func respondWithHTTPError(w http.ResponseWriter, code int, message string) {
     respondWithJSON(w, code, map[string]string{"error": message})
 }
 
@@ -116,11 +115,15 @@ func collectMetrics() Metrics {
     var m runtime.MemStats
     runtime.ReadMemStats(&m)
 
+    mutex.RLock()
+    startTime := state.StartupTime
+    mutex.RUnlock()
+
     return Metrics{
         MemoryUsageMB:     float64(m.Alloc) / 1024 / 1024,
         CPUUsagePercent:   getCPUUsage(),
         DiskUsagePercent:  getDiskUsage(),
-        UptimeSeconds:     time.Since(state.StartupTime).Seconds(),
+        UptimeSeconds:     time.Since(startTime).Seconds(),
         ArticlesPerMinute: getArticleRate(),
         ErrorsPerHour:     getErrorRate(),
         APICallsPerHour:   getAPICallRate(),
@@ -153,12 +156,9 @@ func getAPICallRate() float64 {
     return 0.0
 }
 
-// Logger returns the application logger
-func Logger() interface {
+// Logger interface and implementation
+type Logger interface {
     Printf(format string, v ...interface{})
-} {
-    // This would typically return a configured logger
-    return defaultLogger
 }
 
 var defaultLogger = &DefaultLogger{}
@@ -169,4 +169,43 @@ type DefaultLogger struct{}
 // Printf implements basic printf logging
 func (l *DefaultLogger) Printf(format string, v ...interface{}) {
     fmt.Printf(time.Now().Format("2006-01-02 15:04:05")+" "+format+"\n", v...)
+}
+
+// Logger returns the application logger
+func Logger() Logger {
+    return defaultLogger
+}
+
+// NewErrorBuffer creates a new error buffer with specified size
+func NewErrorBuffer(size int) *ErrorBuffer {
+    return &ErrorBuffer{
+        events: make([]*ErrorEvent, 0, size),
+        size:   size,
+    }
+}
+
+// Add adds a new error event to the buffer
+func (eb *ErrorBuffer) Add(event *ErrorEvent) {
+    eb.mutex.Lock()
+    defer eb.mutex.Unlock()
+
+    if len(eb.events) >= eb.size {
+        // Remove oldest event
+        eb.events = eb.events[1:]
+    }
+    eb.events = append(eb.events, event)
+}
+
+// GetRecent returns the most recent error events
+func (eb *ErrorBuffer) GetRecent(count int) []*ErrorEvent {
+    eb.mutex.RLock()
+    defer eb.mutex.RUnlock()
+
+    if count > len(eb.events) {
+        count = len(eb.events)
+    }
+
+    result := make([]*ErrorEvent, count)
+    copy(result, eb.events[len(eb.events)-count:])
+    return result
 }
