@@ -1,310 +1,197 @@
+// cmd/sankarea/digest.go
 package main
 
 import (
-	"fmt"
-	"sort"
-	"strings"
-	"time"
+    "fmt"
+    "sort"
+    "strings"
+    "time"
 
-	"github.com/bwmarrin/discordgo"
+    "github.com/bwmarrin/discordgo"
 )
 
-// DigestConfig holds configuration for news digests
-type DigestConfig struct {
-	Categories       []string // Categories to include
-	MaxItemsPerCategory int   // Max items per category
-	TopArticlesCount int      // Number of top articles to show
-	IncludeTrending  bool     // Whether to include trending analysis
-	IncludeStats     bool     // Whether to include stats
+// DigestResult represents a formatted news digest
+type DigestResult struct {
+    Embeds     []*discordgo.MessageEmbed
+    TotalNews  int
+    Categories map[string]int
 }
 
-// GenerateDailyDigest creates a daily news digest
-func GenerateDailyDigest(s *discordgo.Session, channelID string) error {
-	// Load sources
-	sources, err := LoadSources()
-	if err != nil {
-		return fmt.Errorf("Failed to load sources: %v", err)
-	}
+// generateDigest creates a news digest for the specified time range
+func generateDigest(startTime, endTime time.Time) (*DigestResult, error) {
+    // Load state for recent articles
+    state, err := LoadState()
+    if err != nil {
+        return nil, fmt.Errorf("failed to load state: %v", err)
+    }
 
-	// Load state
-	state, err := LoadState()
-	if err != nil {
-		return fmt.Errorf("Failed to load state: %v", err)
-	}
+    // Filter articles within time range
+    var articles []*NewsArticle
+    for _, article := range state.RecentArticles {
+        if article.PublishedAt.After(startTime) && article.PublishedAt.Before(endTime) {
+            articles = append(articles, article)
+        }
+    }
 
-	// Default digest config
-	config := DigestConfig{
-		Categories:        []string{},  // All categories
-		MaxItemsPerCategory: 5,
-		TopArticlesCount:  3,
-		IncludeTrending:   true,
-		IncludeStats:      true,
-	}
+    // Sort articles by category and then by publish date
+    sort.Slice(articles, func(i, j int) bool {
+        if articles[i].Category == articles[j].Category {
+            return articles[i].PublishedAt.After(articles[j].PublishedAt)
+        }
+        return articles[i].Category < articles[j].Category
+    })
 
-	// Get today's date
-	today := time.Now().Format("Monday, January 2, 2006")
+    // Group articles by category
+    categoryArticles := make(map[string][]*NewsArticle)
+    categoryCount := make(map[string]int)
+    for _, article := range articles {
+        categoryArticles[article.Category] = append(categoryArticles[article.Category], article)
+        categoryCount[article.Category]++
+    }
 
-	// Send digest header
-	_, err = s.ChannelMessageSend(channelID, fmt.Sprintf("# 📰 Daily News Digest for %s", today))
-	if err != nil {
-		return fmt.Errorf("Failed to send header: %v", err)
-	}
+    // Create digest embeds
+    var embeds []*discordgo.MessageEmbed
 
-	// Get articles from the database
-	articles, err := getArticlesForDigest(24) // Last 24 hours
-	if err != nil {
-		return fmt.Errorf("Failed to retrieve articles: %v", err)
-	}
+    // Summary embed
+    summaryEmbed := &discordgo.MessageEmbed{
+        Title: "📰 News Digest Summary",
+        Description: fmt.Sprintf("News from %s to %s",
+            startTime.Format("2006-01-02 15:04 MST"),
+            endTime.Format("2006-01-02 15:04 MST")),
+        Fields: make([]*discordgo.MessageEmbedField, 0),
+        Color:  0x7289DA,
+    }
 
-	// Group articles by category
-	categorizedArticles := make(map[string][]ArticleDigest)
-	for _, article := range articles {
-		cat := article.Category
-		if cat == "" {
-			cat = "General"
-		}
-		categorizedArticles[cat] = append(categorizedArticles[cat], article)
-	}
+    // Add category summaries
+    for category, count := range categoryCount {
+        summaryEmbed.Fields = append(summaryEmbed.Fields, &discordgo.MessageEmbedField{
+            Name:   getCategoryEmoji(category) + " " + category,
+            Value:  fmt.Sprintf("%d articles", count),
+            Inline: true,
+        })
+    }
 
-	// Generate trending topics
-	if config.IncludeTrending {
-		trendingTopics := analyzeTrendingTopics(articles)
-		embed := createTrendingEmbed(trendingTopics)
-		_, err = s.ChannelMessageSendEmbed(channelID, embed)
-		if err != nil {
-			Logger().Printf("Failed to send trending topics: %v", err)
-		}
-	}
+    embeds = append(embeds, summaryEmbed)
 
-	// Send each category
-	categories := getSortedCategories(categorizedArticles)
-	for _, category := range categories {
-		articles := categorizedArticles[category]
-		if len(articles) == 0 {
-			continue
-		}
+    // Category embeds
+    for category, articles := range categoryArticles {
+        // Skip categories with no articles
+        if len(articles) == 0 {
+            continue
+        }
 
-		// Sort articles by published time (newest first)
-		sort.Slice(articles, func(i, j int) bool {
-			return articles[i].Published.After(articles[j].Published)
-		})
+        // Create category embed
+        categoryEmbed := &discordgo.MessageEmbed{
+            Title: fmt.Sprintf("%s %s News", getCategoryEmoji(category), category),
+            Color: getCategoryColor(category),
+            Fields: make([]*discordgo.MessageEmbedField, 0),
+        }
 
-		// Limit articles per category
-		if len(articles) > config.MaxItemsPerCategory {
-			articles = articles[:config.MaxItemsPerCategory]
-		}
+        // Add top articles
+        maxArticles := 10 // Maximum articles per category
+        for i, article := range articles {
+            if i >= maxArticles {
+                break
+            }
 
-		// Create category embed
-		embed := createCategoryEmbed(category, articles)
-		_, err = s.ChannelMessageSendEmbed(channelID, embed)
-		if err != nil {
-			Logger().Printf("Failed to send category digest: %v", err)
-		}
+            // Create article field
+            field := &discordgo.MessageEmbedField{
+                Name: truncateString(article.Title, 256),
+                Value: fmt.Sprintf("Source: %s\n%s\n%s",
+                    article.Source,
+                    article.URL,
+                    getReliabilityBadge(article)),
+                Inline: false,
+            }
+            categoryEmbed.Fields = append(categoryEmbed.Fields, field)
+        }
 
-		// Small delay to avoid rate limiting
-		time.Sleep(500 * time.Millisecond)
-	}
+        // Add overflow message if needed
+        if len(articles) > maxArticles {
+            categoryEmbed.Footer = &discordgo.MessageEmbedFooter{
+                Text: fmt.Sprintf("And %d more articles...", len(articles)-maxArticles),
+            }
+        }
 
-	// Send stats if requested
-	if config.IncludeStats {
-		statsEmbed := createStatsEmbed(sources)
-		_, err = s.ChannelMessageSendEmbed(channelID, statsEmbed)
-		if err != nil {
-			Logger().Printf("Failed to send stats: %v", err)
-		}
-	}
+        embeds = append(embeds, categoryEmbed)
+    }
 
-	// Update state
-	state.DigestCount++
-	state.DigestNextTime = calculateNextDigestTime(cfg.DigestCronSchedule)
-	SaveState(state)
-
-	return nil
+    return &DigestResult{
+        Embeds:     embeds,
+        TotalNews:  len(articles),
+        Categories: categoryCount,
+    }, nil
 }
 
-// ArticleDigest represents an article in a digest
-type ArticleDigest struct {
-	Title     string
-	URL       string
-	Source    string
-	Published time.Time
-	Category  string
-	Bias      string
-	Summary   string
+// getReliabilityBadge returns a formatted reliability indicator
+func getReliabilityBadge(article *NewsArticle) string {
+    if article.FactCheckResult == nil {
+        return "🔄 Fact check pending"
+    }
+
+    var badge string
+    switch article.FactCheckResult.ReliabilityTier {
+    case "High":
+        badge = "🟢 High reliability"
+    case "Medium":
+        badge = "🟡 Medium reliability"
+    case "Low":
+        badge = "🔴 Low reliability"
+    default:
+        badge = "⚫ Unknown reliability"
+    }
+
+    return fmt.Sprintf("%s (%.1f/1.0)", badge, article.FactCheckResult.Score)
 }
 
-// getArticlesForDigest gets articles for a digest
-// This would normally pull from a database, but for this example we'll simulate
-func getArticlesForDigest(hours int) ([]ArticleDigest, error) {
-	// In a real implementation, this would fetch from a database
-	// For now, return sample data
-	return []ArticleDigest{
-		{
-			Title:     "Global Economy Shows Signs of Recovery",
-			URL:       "https://example.com/economy-recovery",
-			Source:    "Reuters",
-			Published: time.Now().Add(-3 * time.Hour),
-			Category:  "Business",
-			Bias:      "Center",
-		},
-		{
-			Title:     "New Climate Agreement Reached",
-			URL:       "https://example.com/climate-agreement",
-			Source:    "BBC",
-			Published: time.Now().Add(-5 * time.Hour),
-			Category:  "Environment",
-			Bias:      "Center-Left",
-		},
-		{
-			Title:     "Tech Companies Face New Regulations",
-			URL:       "https://example.com/tech-regulations",
-			Source:    "CNN",
-			Published: time.Now().Add(-8 * time.Hour),
-			Category:  "Technology",
-			Bias:      "Left-Center",
-		},
-		{
-			Title:     "Sports Team Wins Championship",
-			URL:       "https://example.com/sports-championship",
-			Source:    "Fox News",
-			Published: time.Now().Add(-12 * time.Hour),
-			Category:  "Sports",
-			Bias:      "Right",
-		},
-	}, nil
+// getCategoryEmoji returns an emoji for the given category
+func getCategoryEmoji(category string) string {
+    switch category {
+    case CategoryTechnology:
+        return "💻"
+    case CategoryBusiness:
+        return "💼"
+    case CategoryScience:
+        return "🔬"
+    case CategoryHealth:
+        return "🏥"
+    case CategoryPolitics:
+        return "🏛️"
+    case CategorySports:
+        return "⚽"
+    case CategoryWorld:
+        return "🌍"
+    default:
+        return "📰"
+    }
 }
 
-// analyzeTrendingTopics analyzes articles to find trending topics
-func analyzeTrendingTopics(articles []ArticleDigest) []string {
-	// In a real implementation, this would do NLP analysis
-	// For now, return sample data
-	return []string{
-		"Climate Change",
-		"Economic Recovery",
-		"Tech Regulation",
-	}
+// getCategoryColor returns a color for the given category
+func getCategoryColor(category string) int {
+    switch category {
+    case CategoryTechnology:
+        return 0x7289DA // Discord Blue
+    case CategoryBusiness:
+        return 0x43B581 // Green
+    case CategoryScience:
+        return 0xFAA61A // Orange
+    case CategoryHealth:
+        return 0xF04747 // Red
+    case CategoryPolitics:
+        return 0x747F8D // Gray
+    case CategorySports:
+        return 0x2ECC71 // Emerald
+    case CategoryWorld:
+        return 0x99AAB5 // Light Gray
+    default:
+        return 0x000000 // Black
+    }
 }
 
-// getSortedCategories returns sorted category names
-func getSortedCategories(categorizedArticles map[string][]ArticleDigest) []string {
-	var categories []string
-	for cat := range categorizedArticles {
-		categories = append(categories, cat)
-	}
-	sort.Strings(categories)
-	return categories
-}
-
-// createTrendingEmbed creates an embed for trending topics
-func createTrendingEmbed(topics []string) *discordgo.MessageEmbed {
-	description := "Current trending topics in the news:"
-	for _, topic := range topics {
-		description += fmt.Sprintf("\n• **%s**", topic)
-	}
-
-	return &discordgo.MessageEmbed{
-		Title:       "🔥 Trending Topics",
-		Description: description,
-		Color:       0xFF9900, // Orange
-	}
-}
-
-// createCategoryEmbed creates an embed for a category
-func createCategoryEmbed(category string, articles []ArticleDigest) *discordgo.MessageEmbed {
-	// Set color based on category
-	color := 0x0099FF // Default blue
-	switch strings.ToLower(category) {
-	case "politics":
-		color = 0x880088 // Purple
-	case "business", "economy":
-		color = 0x008800 // Green
-	case "technology":
-		color = 0x0000FF // Blue
-	case "health":
-		color = 0xFF0000 // Red
-	case "science":
-		color = 0x00FFFF // Cyan
-	case "entertainment":
-		color = 0xFF00FF // Pink
-	case "sports":
-		color = 0xFF8800 // Orange
-	}
-
-	// Build description
-	description := ""
-	for _, article := range articles {
-		description += fmt.Sprintf("• [%s](%s) - %s (%s)\n", 
-			article.Title, 
-			article.URL, 
-			article.Source,
-			article.Published.Format("Jan 2, 15:04"))
-	}
-
-	return &discordgo.MessageEmbed{
-		Title:       fmt.Sprintf("📰 %s News", category),
-		Description: description,
-		Color:       color,
-	}
-}
-
-// createStatsEmbed creates an embed with stats
-func createStatsEmbed(sources []Source) *discordgo.MessageEmbed {
-	// Count active sources by bias
-	biasCounts := make(map[string]int)
-	totalSources := 0
-	activeSources := 0
-
-	for _, source := range sources {
-		totalSources++
-		if source.Active && !source.Paused {
-			activeSources++
-			bias := source.Bias
-			if bias == "" {
-				bias = "Unknown"
-			}
-			biasCounts[bias]++
-		}
-	}
-
-	// Build description
-	description := fmt.Sprintf("**Active Sources**: %d/%d\n\n**Coverage by Bias**:\n", 
-		activeSources, totalSources)
-	
-	// Add bias distribution
-	biases := []string{"Left", "Left-Center", "Center", "Right-Center", "Right"}
-	for _, bias := range biases {
-		count := biasCounts[bias]
-		bar := strings.Repeat("█", count)
-		if bar == "" {
-			bar = "▫️"
-		}
-		description += fmt.Sprintf("%s: %s (%d)\n", bias, bar, count)
-	}
-
-	// Add unknown if any
-	if count := biasCounts["Unknown"]; count > 0 {
-		description += fmt.Sprintf("Unknown: %s (%d)\n", 
-			strings.Repeat("█", count), count)
-	}
-
-	return &discordgo.MessageEmbed{
-		Title:       "📊 News Coverage Stats",
-		Description: description,
-		Color:       0x888888, // Gray
-	}
-}
-
-// calculateNextDigestTime calculates when the next digest should run
-func calculateNextDigestTime(cronSchedule string) time.Time {
-	// This would normally use proper cron parsing
-	// For simplicity, default to next day at 8 AM
-	now := time.Now()
-	tomorrow := now.AddDate(0, 0, 1)
-	return time.Date(
-		tomorrow.Year(),
-		tomorrow.Month(),
-		tomorrow.Day(),
-		8, 0, 0, 0,
-		tomorrow.Location(),
-	)
+// truncateString truncates a string to the specified length
+func truncateString(s string, maxLen int) string {
+    if len(s) <= maxLen {
+        return s
+    }
+    return s[:maxLen-3] + "..."
 }
