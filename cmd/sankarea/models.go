@@ -2,12 +2,12 @@
 package main
 
 import (
-    "net/http"
+    "encoding/json"
+    "os"
     "sync"
     "time"
 
     "github.com/bwmarrin/discordgo"
-    "github.com/robfig/cron/v3"
 )
 
 // Article represents parsed article content
@@ -117,13 +117,6 @@ type State struct {
     LockdownSetBy string    `json:"lockdownSetBy"`
 }
 
-// Permission levels for command access
-const (
-    PermLevelEveryone = iota
-    PermLevelAdmin
-    PermLevelOwner
-)
-
 // ErrorEvent represents an error event
 type ErrorEvent struct {
     Time      time.Time `json:"time"`
@@ -141,4 +134,49 @@ type Metrics struct {
     ArticlesPerMinute float64 `json:"articlesPerMinute"`
     ErrorsPerHour     float64 `json:"errorsPerHour"`
     APICallsPerHour   float64 `json:"apiCallsPerHour"`
+}
+
+// ErrorBuffer represents a circular buffer of error events
+type ErrorBuffer struct {
+    events []*ErrorEvent
+    size   int
+    mutex  sync.RWMutex
+}
+
+// Permission levels for command access
+const (
+    PermLevelEveryone = iota
+    PermLevelAdmin
+    PermLevelOwner
+)
+
+// LoadState loads the application state from disk
+func LoadState() (*State, error) {
+    data, err := os.ReadFile("data/state.json")
+    if err != nil {
+        if os.IsNotExist(err) {
+            return &State{
+                StartupTime: time.Now(),
+                Version:    cfg.Version,
+            }, nil
+        }
+        return nil, err
+    }
+
+    var state State
+    if err := json.Unmarshal(data, &state); err != nil {
+        return nil, err
+    }
+
+    return &state, nil
+}
+
+// SaveState saves the application state to disk
+func SaveState(state *State) error {
+    data, err := json.MarshalIndent(state, "", "  ")
+    if err != nil {
+        return err
+    }
+
+    return os.WriteFile("data/state.json", data, 0644)
 }
