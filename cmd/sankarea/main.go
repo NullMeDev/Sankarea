@@ -1,847 +1,220 @@
+// cmd/sankarea/main.go
 package main
 
 import (
-	"context"
-	"fmt"
-	"log"
-	"os"
-	"os/signal"
-	"path/filepath"
-	"strings"
-	"syscall"
-	"time"
+    "fmt"
+    "log"
+    "os"
+    "os/signal"
+    "sync"
+    "syscall"
+    "time"
 
-	"github.com/bwmarrin/discordgo"
-	"github.com/robfig/cron/v3"
+    "github.com/bwmarrin/discordgo"
+    "github.com/robfig/cron/v3"
 )
 
 var (
-	cfg             *Config
-	dg              *discordgo.Session
-	cronManager     *cron.Cron
-	configManager   *ConfigManager
-	ctx             context.Context
-	cancel          context.CancelFunc
-	imageDownloader *ImageDownloader
-	filterManager   *UserFilterManager
-	healthMonitor   *HealthMonitor
-	keywordTracker  *KeywordTracker
-	digester        *DigestManager
-	langManager     *LanguageManager
-	credScorer      *CredibilityScorer
-	analyticsEngine *AnalyticsEngine
-	errorSystem     *ErrorSystem
-	botStartTime    time.Time
+    cfg    *Config
+    state  *State
+    cronManager *cron.Cron
+    mutex  sync.RWMutex
 )
 
+func init() {
+    // Initialize configuration
+    cfg = LoadEnvConfig()
+    if err := ValidateEnvConfig(cfg); err != nil {
+        log.Fatalf("Configuration error: %v", err)
+    }
+
+    // Initialize state
+    state = &State{
+        StartupTime: time.Now(),
+        Version:     cfg.Version,
+    }
+
+    // Initialize environment
+    if err := InitializeEnvironment(); err != nil {
+        log.Fatalf("Environment initialization error: %v", err)
+    }
+
+    // Initialize cron manager
+    cronManager = cron.New(cron.WithSeconds())
+}
+
 func main() {
-	// Record startup time
-	botStartTime = time.Now()
+    // Set up logging
+    logFile, err := os.OpenFile("data/logs/sankarea.log", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+    if err != nil {
+        log.Fatalf("Failed to open log file: %v", err)
+    }
+    defer logFile.Close()
+    log.SetOutput(logFile)
 
-	// Create a cancellable context for the entire app
-	ctx, cancel = context.WithCancel(context.Background())
-	defer cancel()
+    // Create Discord session
+    dg, err := discordgo.New("Bot " + cfg.BotToken)
+    if err != nil {
+        log.Fatalf("Error creating Discord session: %v", err)
+    }
 
-	// Set up panic recovery
-	defer RecoverFromPanic("main")
+    // Set up intents
+    dg.Identify.Intents = discordgo.IntentsGuildMessages |
+        discordgo.IntentsGuildMembers |
+        discordgo.IntentsGuildMessageReactions |
+        discordgo.IntentsDirectMessages
 
-	fmt.Println("Sankarea bot v" + VERSION + " starting up...")
+    // Register handlers
+    dg.AddHandler(messageCreate)
+    dg.AddHandler(ready)
+    dg.AddHandler(guildCreate)
+    dg.AddHandler(interactionCreate)
 
-	// Initialize subsystems
-	LoadEnv()
-	EnsureDirectories()
-	FileMustExist("config/config.json")
-	FileMustExist("config/sources.yml")
+    // Connect to Discord
+    err = dg.Open()
+    if err != nil {
+        log.Fatalf("Error opening Discord connection: %v", err)
+    }
+    defer dg.Close()
 
-	if err := SetupLogging(); err != nil {
-		log.Printf("Warning: %v", err)
-	}
+    // Initialize components
+    if err := initializeComponents(dg); err != nil {
+        log.Fatalf("Failed to initialize components: %v", err)
+    }
 
-	// Initialize error handling system
-	errorSystem = NewErrorSystem(100) // Store last 100 errors
+    // Start health monitoring
+    healthMonitor = NewHealthMonitor()
+    healthMonitor.StartPeriodicChecks(time.Minute)
+    defer healthMonitor.StopChecks()
 
-	// Load configuration
-	var err error
-	cfg, err = LoadConfig()
-	if err != nil {
-		errorSystem.HandleError("Failed to load config", err, "startup", ErrorSeverityFatal)
-	}
+    // Start the dashboard if enabled
+    if cfg.EnableDashboard {
+        if err := StartDashboard(); err != nil {
+            log.Printf("Failed to start dashboard: %v", err)
+        }
+    }
 
-	// Start config manager for auto-reload
-	configManager, err = NewConfigManager(configFilePath, 1*time.Minute)
-	if err != nil {
-		Logger().Printf("Warning: Config auto-reload not available: %v", err)
-	} else {
-		configManager.SetReloadHandler(func(newCfg *Config) {
-			cfg = newCfg
-			Logger().Println("Configuration reloaded successfully")
-		})
-		configManager.StartWatching()
-	}
+    // Start scheduled tasks
+    setupScheduledTasks(dg)
 
-	// Load sources and state
-	sources, err := LoadSources()
-	if err != nil {
-		errorSystem.HandleError("Failed to load sources", err, "startup", ErrorSeverityFatal)
-	}
+    // Initial news fetch if enabled
+    if cfg.FetchNewsOnStartup {
+        go fetchAndPostArticles(dg, cfg.NewsChannelID, loadSources(), cfg.MaxPostsPerSource)
+    }
 
-	state, err := LoadState()
-	if err != nil {
-		errorSystem.HandleError("Failed to load state", err, "startup", ErrorSeverityFatal)
-	}
+    // Wait for shutdown signal
+    log.Printf("Bot is now running. Press CTRL-C to exit.")
+    sc := make(chan os.Signal, 1)
+    signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt)
+    <-sc
 
-	// Initialize state with current time
-	state.StartupTime = time.Now()
-	if state.Version == "" {
-		state.Version = cfg.Version
-	}
-	if err := SaveState(state); err != nil {
-		errorSystem.HandleError("Failed to save initial state", err, "startup", ErrorSeverityMedium)
-	}
-
-	// Initialize subsystems
-	initializeSubsystems()
-
-	// Initialize discord connection
-	if cfg.BotToken == "" {
-		errorSystem.HandleError("Discord bot token is empty", fmt.Errorf("BotToken not set"), "discord", ErrorSeverityFatal)
-	}
-	
-	dg, err = discordgo.New("Bot " + cfg.BotToken)
-	if err != nil {
-		errorSystem.HandleError("Failed to create Discord session", err, "discord", ErrorSeverityFatal)
-	}
-
-	// Set intents for increased functionality
-	dg.Identify.Intents = discordgo.IntentsGuildMessages | 
-		discordgo.IntentsGuildMessageReactions | 
-		discordgo.IntentsDirectMessages |
-		discordgo.IntentsMessageContent
-
-	// Register handlers
-	dg.AddHandler(handleReady)
-	dg.AddHandler(handleInteraction)
-	dg.AddHandler(handleMessage)
-
-	// Start the bot connection
-	err = dg.Open()
-	if err != nil {
-		errorSystem.HandleError("Failed to connect to Discord", err, "discord", ErrorSeverityFatal)
-	}
-	defer dg.Close()
-
-	// Register slash commands
-	registerCommands()
-
-	// Start the dashboard
-	if cfg.EnableDashboard {
-		if err := StartDashboard(); err != nil {
-			Logger().Printf("Warning: Dashboard initialization failed: %v", err)
-		}
-	}
-
-	// Start news update cron
-	startNewsUpdateCron()
-
-	// Start digest scheduler
-	if err := digester.StartScheduler(dg); err != nil {
-		Logger().Printf("Warning: Digest scheduler initialization failed: %v", err)
-	}
-
-	// Wait for termination signal
-	Logger().Println("Bot is now running. Press CTRL+C to exit.")
-	sc := make(chan os.Signal, 1)
-	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM)
-	<-sc
-
-	// Clean shutdown
-	Logger().Println("Shutting down gracefully...")
-	saveAllData()
-	cancel() // Cancel all ongoing operations
+    // Cleanup
+    log.Println("Shutting down...")
+    cleanupAndExit(dg)
 }
 
-func initializeSubsystems() {
-	// Initialize image downloader
-	imageDownloader = NewImageDownloader()
-	if err := imageDownloader.Initialize(); err != nil {
-		Logger().Printf("Warning: Image downloader initialization failed: %v", err)
-	}
+func initializeComponents(s *discordgo.Session) error {
+    // Initialize database if enabled
+    if cfg.EnableDatabase {
+        if err := InitDB(); err != nil {
+            return fmt.Errorf("failed to initialize database: %v", err)
+        }
+    }
 
-	// Initialize user filter manager
-	filterManager = NewUserFilterManager()
-	if err := filterManager.Initialize(); err != nil {
-		Logger().Printf("Warning: User filter manager initialization failed: %v", err)
-	}
+    // Register commands
+    if err := registerCommands(s); err != nil {
+        return fmt.Errorf("failed to register commands: %v", err)
+    }
 
-	// Initialize health monitoring
-	healthMonitor = NewHealthMonitor()
-	healthMonitor.StartPeriodicChecks(5 * time.Minute)
-	
-	// Initialize keyword tracking
-	keywordTracker = NewKeywordTracker()
-	if err := keywordTracker.Initialize(); err != nil {
-		Logger().Printf("Warning: Keyword tracker initialization failed: %v", err)
-	}
-	
-	// Initialize digest manager
-	digester = NewDigestManager()
-	
-	// Initialize language manager
-	langManager = NewLanguageManager()
-	if err := langManager.Initialize(); err != nil {
-		Logger().Printf("Warning: Language manager initialization failed: %v", err)
-	}
-	
-	// Initialize credibility scorer
-	credScorer = NewCredibilityScorer()
-	if err := credScorer.Initialize(); err != nil {
-		Logger().Printf("Warning: Credibility scorer initialization failed: %v", err)
-	}
-	
-	// Initialize analytics engine
-	analyticsEngine = NewAnalyticsEngine()
-	if err := analyticsEngine.Initialize(); err != nil {
-		Logger().Printf("Warning: Analytics engine initialization failed: %v", err)
-	}
-	
-	// Initialize database if enabled
-	if cfg.EnableDatabase {
-		if err := InitDB(); err != nil {
-			errorSystem.HandleError("Failed to initialize database", err, "database", ErrorSeverityMedium)
-			// Continue without database
-		} else {
-			Logger().Println("Database initialized successfully")
-		}
-	}
-	
-	// Start health API server if port is configured
-	if cfg.HealthAPIPort > 0 {
-		StartHealthServer(cfg.HealthAPIPort)
-	}
+    return nil
 }
 
-func EnsureDirectories() {
-	dirs := []string{
-		"data",
-		"logs",
-		"config",
-		"data/images",
-		"data/user_filters",
-		"data/analytics",
-		"data/cache",
-		"dashboard/templates",
-		"dashboard/static",
-		"bin", // Add bin directory for build output
-	}
+func setupScheduledTasks(s *discordgo.Session) {
+    // Schedule news fetching
+    if _, err := cronManager.AddFunc(cfg.News15MinCron, func() {
+        defer RecoverFromPanic("news-fetch")
+        fetchAndPostArticles(s, cfg.NewsChannelID, loadSources(), cfg.MaxPostsPerSource)
+    }); err != nil {
+        log.Printf("Failed to schedule news fetching: %v", err)
+    }
 
-	for _, dir := range dirs {
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			log.Fatalf("Failed to create directory %s: %v", dir, err)
-		}
-	}
+    // Schedule digest creation
+    if _, err := cronManager.AddFunc(cfg.DigestCronSchedule, func() {
+        defer RecoverFromPanic("digest")
+        createAndSendDigest(s, cfg.NewsChannelID)
+    }); err != nil {
+        log.Printf("Failed to schedule digest creation: %v", err)
+    }
+
+    // Start the cron manager
+    cronManager.Start()
 }
 
-func handleReady(s *discordgo.Session, r *discordgo.Ready) {
-	Logger().Printf("Logged in as: %s#%s", r.User.Username, r.User.Discriminator)
-	
-	// Set bot status
-	err := s.UpdateGameStatus(0, "Monitoring news | /help")
-	if err != nil {
-		Logger().Printf("Error setting status: %v", err)
-	}
-	
-	// Log guilds
-	Logger().Printf("Connected to %d guilds", len(r.Guilds))
-	
-	// Handle first-time setup if needed
-	if len(r.Guilds) > 0 && cfg.GuildID == "" {
-		cfg.GuildID = r.Guilds[0].ID
-		Logger().Printf("Setting default guild ID to %s", cfg.GuildID)
-		SaveConfig(cfg)
-	}
-	
-	// Run an immediate news fetch if enabled
-	if cfg.FetchNewsOnStartup {
-		Logger().Println("Performing initial news fetch...")
-		go func() {
-			defer RecoverFromPanic("initial-news-fetch")
-			if err := fetchAllNews(s); err != nil {
-				Logger().Printf("Error during initial news fetch: %v", err)
-				errorSystem.HandleError("Initial news fetch failed", err, "news-fetch", ErrorSeverityMedium)
-			}
-		}()
-	}
+func cleanupAndExit(s *discordgo.Session) {
+    // Stop cron jobs
+    if cronManager != nil {
+        cronManager.Stop()
+    }
+
+    // Update state
+    mutex.Lock()
+    state.ShutdownTime = time.Now()
+    saveState(state)
+    mutex.Unlock()
+
+    // Close Discord connection
+    s.Close()
+
+    // Final log message
+    log.Printf("Bot shutdown complete. Uptime: %s", FormatDuration(time.Since(state.StartupTime)))
 }
 
-func startNewsUpdateCron() {
-	cronManager = cron.New()
-	
-	// Schedule news updates based on configuration
-	if cfg.News15MinCron != "" {
-		_, err := cronManager.AddFunc(cfg.News15MinCron, func() {
-			if err := fetchAllNews(dg); err != nil {
-				Logger().Printf("Error during scheduled news fetch: %v", err)
-				errorSystem.HandleError("Scheduled news fetch failed", err, "news-fetch", ErrorSeverityMedium)
-			}
-		})
-		
-		if err != nil {
-			Logger().Printf("Error scheduling news updates: %v", err)
-		} else {
-			Logger().Printf("Scheduled news updates with cron: %s", cfg.News15MinCron)
-		}
-	} else {
-		// Default to every 15 minutes if not specified
-		_, err := cronManager.AddFunc("*/15 * * * *", func() {
-			if err := fetchAllNews(dg); err != nil {
-				Logger().Printf("Error during default scheduled news fetch: %v", err)
-				errorSystem.HandleError("Default scheduled news fetch failed", err, "news-fetch", ErrorSeverityMedium)
-			}
-		})
-		
-		if err != nil {
-			Logger().Printf("Error scheduling default news updates: %v", err)
-		} else {
-			Logger().Println("Scheduled default news updates every 15 minutes")
-		}
-	}
-	
-	// Start cron manager
-	cronManager.Start()
+func loadSources() []Source {
+    // Implementation of source loading would go here
+    return []Source{}
 }
 
-func fetchAllNews(s *discordgo.Session) error {
-	sources, err := LoadSources()
-	if err != nil {
-		Logger().Printf("Error loading sources: %v", err)
-		return fmt.Errorf("failed to load sources: %w", err)
-	}
-	
-	state, err := LoadState()
-	if err != nil {
-		Logger().Printf("Error loading state: %v", err)
-		return fmt.Errorf("failed to load state: %w", err)
-	}
-	
-	if state.Paused {
-		Logger().Println("News fetching is currently paused")
-		return nil
-	}
-	
-	if err := fetchAndPostNews(s, cfg.NewsChannelID, sources); err != nil {
-		return fmt.Errorf("failed to fetch and post news: %w", err)
-	}
-	
-	// Update state
-	state.LastFetchTime = time.Now()
-	return SaveState(state)
+// Event handlers
+func ready(s *discordgo.Session, r *discordgo.Ready) {
+    log.Printf("Logged in as: %v#%v", s.State.User.Username, s.State.User.Discriminator)
+    s.UpdateGameStatus(0, fmt.Sprintf("v%s | /help", cfg.Version))
 }
 
-func registerCommands() {
-	commands := []*discordgo.ApplicationCommand{
-		{
-			Name:        "ping",
-			Description: "Check if the bot is online",
-		},
-		{
-			Name:        "status",
-			Description: "Shows the current status of the bot",
-		},
-		{
-			Name:        "version",
-			Description: "Shows the current version of the bot",
-		},
-		{
-			Name:        "source",
-			Description: "Manage RSS sources",
-			Options: []*discordgo.ApplicationCommandOption{
-				{
-					Type:        discordgo.ApplicationCommandOptionSubCommand,
-					Name:        "list",
-					Description: "List all RSS sources",
-				},
-				{
-					Type:        discordgo.ApplicationCommandOptionSubCommand,
-					Name:        "add",
-					Description: "Add a new RSS source",
-					Options: []*discordgo.ApplicationCommandOption{
-						{
-							Type:        discordgo.ApplicationCommandOptionString,
-							Name:        "name",
-							Description: "Name of the source",
-							Required:    true,
-						},
-						{
-							Type:        discordgo.ApplicationCommandOptionString,
-							Name:        "url",
-							Description: "URL of the RSS feed",
-							Required:    true,
-						},
-						{
-							Type:        discordgo.ApplicationCommandOptionString,
-							Name:        "category",
-							Description: "Category of the source",
-							Required:    false,
-						},
-					},
-				},
-				{
-					Type:        discordgo.ApplicationCommandOptionSubCommand,
-					Name:        "remove",
-					Description: "Remove an RSS source",
-					Options: []*discordgo.ApplicationCommandOption{
-						{
-							Type:        discordgo.ApplicationCommandOptionString,
-							Name:        "name",
-							Description: "Name of the source to remove",
-							Required:    true,
-						},
-					},
-				},
-				{
-					Type:        discordgo.ApplicationCommandOptionSubCommand,
-					Name:        "info",
-					Description: "Show details about a source",
-					Options: []*discordgo.ApplicationCommandOption{
-						{
-							Type:        discordgo.ApplicationCommandOptionString,
-							Name:        "name",
-							Description: "Name of the source",
-							Required:    true,
-						},
-					},
-				},
-			},
-		},
-		{
-			Name:        "admin",
-			Description: "Admin commands",
-			Options: []*discordgo.ApplicationCommandOption{
-				{
-					Type:        discordgo.ApplicationCommandOptionSubCommand,
-					Name:        "pause",
-					Description: "Pause news updates",
-				},
-				{
-					Type:        discordgo.ApplicationCommandOptionSubCommand,
-					Name:        "resume",
-					Description: "Resume news updates",
-				},
-				{
-					Type:        discordgo.ApplicationCommandOptionSubCommand,
-					Name:        "refresh",
-					Description: "Force refresh of all news sources",
-				},
-			},
-		},
-		{
-			Name:        "factcheck",
-			Description: "Fact check a claim or article",
-			Options: []*discordgo.ApplicationCommandOption{
-				{
-					Type:        discordgo.ApplicationCommandOptionString,
-					Name:        "claim",
-					Description: "The claim to fact check",
-					Required:    true,
-				},
-				{
-					Type:        discordgo.ApplicationCommandOptionString,
-					Name:        "url",
-					Description: "URL to an article (optional)",
-					Required:    false,
-				},
-			},
-		},
-		{
-			Name:        "summarize",
-			Description: "Summarize an article",
-			Options: []*discordgo.ApplicationCommandOption{
-				{
-					Type:        discordgo.ApplicationCommandOptionString,
-					Name:        "url",
-					Description: "URL to the article",
-					Required:    true,
-				},
-			},
-		},
-		{
-			Name:        "help",
-			Description: "Shows help information",
-		},
-		{
-			Name:        "filter",
-			Description: "Set your news filtering preferences",
-			Options: []*discordgo.ApplicationCommandOption{
-				{
-					Type:        discordgo.ApplicationCommandOptionSubCommand,
-					Name:        "show",
-					Description: "Show your current filter settings",
-				},
-				{
-					Type:        discordgo.ApplicationCommandOptionSubCommand,
-					Name:        "source",
-					Description: "Enable/disable a specific source",
-					Options: []*discordgo.ApplicationCommandOption{
-						{
-							Type:        discordgo.ApplicationCommandOptionString,
-							Name:        "name",
-							Description: "Name of the source",
-							Required:    true,
-						},
-						{
-							Type:        discordgo.ApplicationCommandOptionBoolean,
-							Name:        "enabled",
-							Description: "Whether to enable or disable this source",
-							Required:    true,
-						},
-					},
-				},
-				{
-					Type:        discordgo.ApplicationCommandOptionSubCommand,
-					Name:        "category",
-					Description: "Enable/disable a news category",
-					Options: []*discordgo.ApplicationCommandOption{
-						{
-							Type:        discordgo.ApplicationCommandOptionString,
-							Name:        "category",
-							Description: "Name of the category",
-							Required:    true,
-						},
-						{
-							Type:        discordgo.ApplicationCommandOptionBoolean,
-							Name:        "enabled",
-							Description: "Whether to enable or disable this category",
-							Required:    true,
-						},
-					},
-				},
-				{
-					Type:        discordgo.ApplicationCommandOptionSubCommand,
-					Name:        "keywords",
-					Description: "Set keywords to include or exclude",
-					Options: []*discordgo.ApplicationCommandOption{
-						{
-							Type:        discordgo.ApplicationCommandOptionString,
-							Name:        "include",
-							Description: "Keywords to include (comma separated)",
-							Required:    false,
-						},
-						{
-							Type:        discordgo.ApplicationCommandOptionString,
-							Name:        "exclude",
-							Description: "Keywords to exclude (comma separated)",
-							Required:    false,
-						},
-					},
-				},
-				{
-					Type:        discordgo.ApplicationCommandOptionSubCommand,
-					Name:        "reset",
-					Description: "Reset all your filter preferences",
-				},
-			},
-		},
-		{
-			Name:        "suggest",
-			Description: "Suggest a new news source",
-			Options: []*discordgo.ApplicationCommandOption{
-				{
-					Type:        discordgo.ApplicationCommandOptionString,
-					Name:        "url",
-					Description: "URL of the RSS feed",
-					Required:    true,
-				},
-				{
-					Type:        discordgo.ApplicationCommandOptionString,
-					Name:        "name",
-					Description: "Name of the source",
-					Required:    true,
-				},
-				{
-					Type:        discordgo.ApplicationCommandOptionString,
-					Name:        "description",
-					Description: "Description of the source",
-					Required:    false,
-				},
-			},
-		},
-		{
-			Name:        "digest",
-			Description: "Generate and customize news digests",
-			Options: []*discordgo.ApplicationCommandOption{
-				{
-					Type:        discordgo.ApplicationCommandOptionSubCommand,
-					Name:        "now",
-					Description: "Generate a news digest right now",
-					Options: []*discordgo.ApplicationCommandOption{
-						{
-							Type:        discordgo.ApplicationCommandOptionInteger,
-							Name:        "stories",
-							Description: "Maximum number of stories to include",
-							Required:    false,
-						},
-						{
-							Type:        discordgo.ApplicationCommandOptionString,
-							Name:        "categories",
-							Description: "Categories to include (comma separated)",
-							Required:    false,
-						},
-					},
-				},
-				{
-					Type:        discordgo.ApplicationCommandOptionSubCommand,
-					Name:        "settings",
-					Description: "Configure your digest settings",
-					Options: []*discordgo.ApplicationCommandOption{
-						{
-							Type:        discordgo.ApplicationCommandOptionBoolean,
-							Name:        "enabled",
-							Description: "Enable or disable digests",
-							Required:    false,
-						},
-						{
-							Type:        discordgo.ApplicationCommandOptionString,
-							Name:        "schedule",
-							Description: "Schedule in cron format (e.g. '0 8 * * *' for 8 AM daily)",
-							Required:    false,
-						},
-						{
-							Type:        discordgo.ApplicationCommandOptionInteger,
-							Name:        "max_stories",
-							Description: "Maximum number of stories to include",
-							Required:    false,
-						},
-					},
-				},
-			},
-		},
-		{
-			Name:        "track",
-			Description: "Track keywords in news articles",
-			Options: []*discordgo.ApplicationCommandOption{
-				{
-					Type:        discordgo.ApplicationCommandOptionSubCommand,
-					Name:        "add",
-					Description: "Add a keyword to track",
-					Options: []*discordgo.ApplicationCommandOption{
-						{
-							Type:        discordgo.ApplicationCommandOptionString,
-							Name:        "keyword",
-							Description: "Keyword or phrase to track",
-							Required:    true,
-						},
-					},
-				},
-				{
-					Type:        discordgo.ApplicationCommandOptionSubCommand,
-					Name:        "remove",
-					Description: "Remove a tracked keyword",
-					Options: []*discordgo.ApplicationCommandOption{
-						{
-							Type:        discordgo.ApplicationCommandOptionString,
-							Name:        "keyword",
-							Description: "Keyword to remove from tracking",
-							Required:    true,
-						},
-					},
-				},
-				{
-					Type:        discordgo.ApplicationCommandOptionSubCommand,
-					Name:        "list",
-					Description: "List currently tracked keywords",
-				},
-				{
-					Type:        discordgo.ApplicationCommandOptionSubCommand,
-					Name:        "stats",
-					Description: "Show statistics for a tracked keyword",
-					Options: []*discordgo.ApplicationCommandOption{
-						{
-							Type:        discordgo.ApplicationCommandOptionString,
-							Name:        "keyword",
-							Description: "Keyword to show statistics for",
-							Required:    true,
-						},
-					},
-				},
-			},
-		},
-		{
-			Name:        "language",
-			Description: "Change your language settings",
-			Options: []*discordgo.ApplicationCommandOption{
-				{
-					Type:        discordgo.ApplicationCommandOptionString,
-					Name:        "set",
-					Description: "Set your preferred language",
-					Required:    true,
-					Choices: []*discordgo.ApplicationCommandOptionChoice{
-						{
-							Name:  "English",
-							Value: "en",
-						},
-						{
-							Name:  "Spanish",
-							Value: "es",
-						},
-						{
-							Name:  "French",
-							Value: "fr",
-						},
-						{
-							Name:  "German",
-							Value: "de",
-						},
-						{
-							Name:  "Japanese",
-							Value: "ja",
-						},
-					},
-				},
-			},
-		},
-	}
-
-	// Register commands - check if AppID is set first
-	if cfg.AppID == "" {
-		Logger().Println("Warning: Application ID is not set, cannot register commands")
-		return
-	}
-
-	// Register commands
-	if cfg.GuildID != "" {
-		// Guild commands update instantly
-		for _, cmd := range commands {
-			_, err := dg.ApplicationCommandCreate(cfg.AppID, cfg.GuildID, cmd)
-			if err != nil {
-				Logger().Printf("Error creating command %s: %v", cmd.Name, err)
-			}
-		}
-	} else {
-		// Global commands (can take up to an hour to propagate)
-		for _, cmd := range commands {
-			_, err := dg.ApplicationCommandCreate(cfg.AppID, "", cmd)
-			if err != nil {
-				Logger().Printf("Error creating global command %s: %v", cmd.Name, err)
-			}
-		}
-	}
+func guildCreate(s *discordgo.Session, g *discordgo.GuildCreate) {
+    log.Printf("Added to guild: %v", g.Name)
 }
 
-// handleMessage processes incoming Discord messages
-func handleMessage(s *discordgo.Session, m *discordgo.MessageCreate) {
-	// Ignore messages from the bot itself
-	if m.Author.ID == s.State.User.ID {
-		return
-	}
-	
-	// Process direct messages specially
-	if isDM(s, m) {
-		handleDirectMessage(s, m)
-		return
-	}
-	
-	// Process guild messages
-	if strings.HasPrefix(m.Content, "!news") {
-		handleLegacyCommand(s, m)
-	}
-	
-	// Track any keywords in the message
-	if keywordTracker != nil && cfg.EnableKeywordTracking {
-		go func() {
-			defer RecoverFromPanic("keyword-tracker")
-			keywordTracker.CheckForKeywords(m.Content)
-		}()
-	}
+func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
+    // Ignore messages from the bot itself
+    if m.Author.ID == s.State.User.ID {
+        return
+    }
+
+    // Handle direct messages
+    if m.GuildID == "" {
+        handleDirectMessage(s, m)
+    }
 }
 
-// handleDirectMessage handles direct messages to the bot
+func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
+    // Ensure the command is allowed
+    if !CheckCommandPermissions(s, i) {
+        s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+            Type: discordgo.InteractionResponseChannelMessageWithSource,
+            Data: &discordgo.InteractionResponseData{
+                Content: "You don't have permission to use this command.",
+                Flags:   discordgo.MessageFlagsEphemeral,
+            },
+        })
+        return
+    }
+
+    // Handle the command
+    if h, ok := commandHandlers[i.ApplicationCommandData().Name]; ok {
+        h(s, i)
+    }
+}
+
 func handleDirectMessage(s *discordgo.Session, m *discordgo.MessageCreate) {
-	content := strings.TrimSpace(m.Content)
-	
-	// Simple DM handling
-	switch {
-	case strings.HasPrefix(content, "help"):
-		s.ChannelMessageSend(m.ChannelID, "You can use slash commands like /help in servers where I'm added. Direct message support is limited.")
-	case strings.HasPrefix(content, "status"):
-		status := GetSystemStatus()
-		uptime := time.Duration(status["uptime_seconds"].(int64)) * time.Second
-		
-		msg := fmt.Sprintf("**Status:** %s\n", status["status"])
-		msg += fmt.Sprintf("**Version:** %s\n", status["version"])
-		msg += fmt.Sprintf("**Uptime:** %s\n", formatDuration(uptime))
-		msg += fmt.Sprintf("**Feed Count:** %d\n", status["feed_count"])
-		
-		s.ChannelMessageSend(m.ChannelID, msg)
-	case strings.HasPrefix(content, "version"):
-		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Sankarea Bot v%s by %s", VERSION, "NullMeDevok"))
-	default:
-		s.ChannelMessageSend(m.ChannelID, "I don't understand that command. Type 'help' for assistance.")
-	}
-}
-
-func isDM(s *discordgo.Session, m *discordgo.MessageCreate) bool {
-	channel, err := s.Channel(m.ChannelID)
-	if err != nil {
-		return false
-	}
-	
-	return channel.Type == discordgo.ChannelTypeDM
-}
-
-func handleLegacyCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
-	// Handle legacy text commands for backward compatibility
-	s.ChannelMessageSend(m.ChannelID, "Please use slash commands instead. Try /help for more information.")
-}
-
-func saveAllData() {
-	Logger().Println("Saving all data before shutdown...")
-
-	// Save current state
-	state, err := LoadState()
-	if err != nil {
-		Logger().Printf("Error loading state for save: %v", err)
-	} else {
-		state.ShutdownTime = time.Now()
-		if err := SaveState(state); err != nil {
-			Logger().Printf("Error saving state during shutdown: %v", err)
-		}
-	}
-
-	// Save any pending data from subsystems
-	if keywordTracker != nil {
-		if err := keywordTracker.Save(); err != nil {
-			Logger().Printf("Error saving keyword data: %v", err)
-		}
-	}
-
-	if analyticsEngine != nil {
-		if err := analyticsEngine.Save(); err != nil {
-			Logger().Printf("Error saving analytics data: %v", err)
-		}
-	}
-
-	if credScorer != nil {
-		if err := credScorer.Save(); err != nil {
-			Logger().Printf("Error saving credibility data: %v", err)
-		}
-	}
-
-	Logger().Println("Data saved successfully")
-}
-
-// RecoverFromPanic handles panics gracefully
-func RecoverFromPanic(component string) {
-	if r := recover(); r != nil {
-		Logger().Printf("PANIC RECOVERED in %s: %v", component, r)
-		if errorSystem != nil {
-			errorSystem.HandleError(
-				fmt.Sprintf("Panic in %s", component),
-				fmt.Errorf("%v", r),
-				component,
-				ErrorSeverityHigh,
-			)
-		} else {
-			log.Printf("ERROR SYSTEM NOT INITIALIZED: Panic in %s: %v", component, r)
-		}
-	}
+    // Implementation of direct message handling would go here
 }
