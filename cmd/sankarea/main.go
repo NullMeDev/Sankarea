@@ -2,243 +2,140 @@
 package main
 
 import (
-    "context"
-    "database/sql"
-    "flag"
+    "encoding/json"
     "fmt"
+    "log"
     "os"
     "os/signal"
-    "sync"
+    "path/filepath"
     "syscall"
-    "time"
-    
-    "github.com/bwmarrin/discordgo"
 )
 
-var (
-    // Global variables
-    cfg           *Config
-    db            *sql.DB
-    errorBuffer   *ErrorBuffer
-    healthMonitor *HealthMonitor
-    dashboard     *DashboardServer
-    botVersion    = "1.0.0" // This should be updated with your actual version
-)
+// VERSION represents the bot version
+const VERSION = "1.0.0"
+
+// BotConfig represents the bot's configuration
+type BotConfig struct {
+    Token            string   `json:"token"`
+    OwnerID          string   `json:"owner_id"`
+    GuildID          string   `json:"guild_id"`
+    DatabasePath     string   `json:"database_path"`
+    FetchInterval    int      `json:"fetch_interval"`
+    MaxPostsPerRun   int      `json:"max_posts_per_run"`
+    SourcesPath      string   `json:"sources_path"`
+    CachePath        string   `json:"cache_path"`
+    DashboardEnabled bool     `json:"dashboard_enabled"`
+    DashboardPort    int      `json:"dashboard_port"`
+    DashboardHost    string   `json:"dashboard_host"`
+    LogPath          string   `json:"log_path"`
+    LogLevel         string   `json:"log_level"`
+    LogToConsole     bool     `json:"log_to_console"`
+    Categories       []string `json:"categories"`
+    CategoryChannels map[string]string
+}
 
 func main() {
-    startTime := time.Now()
-
-    // Parse command line flags
-    configFile := flag.String("config", "config/config.json", "path to config file")
-    sourcesFile := flag.String("sources", "config/sources.yml", "path to sources file")
-    logLevel := flag.String("log-level", "info", "logging level (debug, info, warn, error)")
-    flag.Parse()
-
-    // Initialize logging first
-    if err := InitializeLogging(*logLevel); err != nil {
-        fmt.Printf("Failed to initialize logging: %v\n", err)
-        os.Exit(1)
-    }
-
-    Logger().Printf("Starting Sankarea News Bot v%s", botVersion)
-    Logger().Printf("Started by %s at %s UTC", "NullMeDev", startTime.Format("2006-01-02 15:04:05"))
-
-    // Load configuration
-    if err := loadConfiguration(*configFile); err != nil {
-        Logger().Printf("Failed to load configuration: %v", err)
-        os.Exit(1)
-    }
-
-    // Initialize environment
-    if err := InitializeEnvironment(); err != nil {
-        Logger().Printf("Failed to initialize environment: %v", err)
-        os.Exit(1)
-    }
-
-    // Initialize error buffer
-    errorBuffer = NewErrorBuffer(100)
-
-    // Initialize state
-    if err := InitializeState(); err != nil {
-        Logger().Printf("Failed to initialize state: %v", err)
-        os.Exit(1)
-    }
-
-    // Initialize health monitor
-    healthMonitor = NewHealthMonitor()
-    healthMonitor.StartPeriodicChecks(1 * time.Minute)
-    defer healthMonitor.StopChecks()
-
-    // Create Discord session
-    discord, err := initializeDiscord()
-    if err != nil {
-        Logger().Printf("Error creating Discord session: %v", err)
-        os.Exit(1)
-    }
-    defer discord.Close()
-
-    // Initialize database if enabled
-    if cfg.EnableDatabase {
-        if err := initializeDatabase(); err != nil {
-            Logger().Printf("Failed to initialize database: %v", err)
-            os.Exit(1)
-        }
-        defer db.Close()
-    }
-
-    // Start dashboard if enabled
-    if cfg.EnableDashboard {
-        if err := initializeDashboard(); err != nil {
-            Logger().Printf("Failed to start dashboard: %v", err)
-            os.Exit(1)
-        }
-    }
-
-    // Initialize scheduler
-    scheduler := NewScheduler()
-    scheduler.Start()
-    defer scheduler.Stop()
-
-    // Register commands
-    if err := registerCommands(discord); err != nil {
-        Logger().Printf("Failed to register commands: %v", err)
-        os.Exit(1)
-    }
-
-    // Initial news fetch if configured
-    if cfg.FetchNewsOnStartup {
-        go func() {
-            if err := fetchNews(discord); err != nil {
-                Logger().Printf("Initial news fetch failed: %v", err)
-            }
-        }()
-    }
-
-    // Log startup completion
-    Logger().Printf("Startup completed in %s", time.Since(startTime))
-    Logger().Printf("Bot is now running. Press CTRL-C to exit.")
-
-    // Wait for shutdown signal
-    shutdownChan := make(chan os.Signal, 1)
-    signal.Notify(shutdownChan, syscall.SIGINT, syscall.SIGTERM, os.Interrupt)
-    <-shutdownChan
-
-    // Graceful shutdown
-    ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-    defer cancel()
-
-    Logger().Println("Initiating graceful shutdown...")
+    // Setup logging
+    log.SetFlags(log.LstdFlags | log.Lshortfile)
     
-    // Begin shutdown sequence
-    if err := performGracefulShutdown(ctx, discord); err != nil {
-        Logger().Printf("Error during shutdown: %v", err)
-    }
-
-    Logger().Println("Shutdown complete")
-}
-
-func initializeDiscord() (*discordgo.Session, error) {
-    discord, err := discordgo.New("Bot " + cfg.BotToken)
+    // Load configuration
+    config, err := loadConfig()
     if err != nil {
-        return nil, fmt.Errorf("error creating Discord session: %v", err)
+        log.Fatalf("Failed to load configuration: %v", err)
     }
 
-    // Register event handlers
-    discord.AddHandler(messageCreate)
-    discord.AddHandler(interactionCreate)
-    discord.AddHandler(ready)
-
-    // Open Discord connection
-    if err := discord.Open(); err != nil {
-        return nil, fmt.Errorf("error opening Discord connection: %v", err)
+    // Ensure required directories exist
+    if err := ensureDirectories(config); err != nil {
+        log.Fatalf("Failed to create required directories: %v", err)
     }
 
-    return discord, nil
-}
-
-func initializeDashboard() error {
-    dashboard = NewDashboardServer()
-    if err := dashboard.Initialize(); err != nil {
-        return fmt.Errorf("failed to initialize dashboard: %v", err)
-    }
-    return dashboard.Start()
-}
-
-func InitializeState() error {
-    var err error
-    state, err = LoadState()
+    // Create and start bot
+    bot, err := NewBot(config)
     if err != nil {
-        return fmt.Errorf("failed to load state: %v", err)
+        log.Fatalf("Failed to create bot: %v", err)
     }
 
-    // Update startup information
-    return UpdateState(func(s *State) {
-        s.StartupTime = time.Now()
-        s.Version = botVersion
-        s.ErrorCount = 0
-        s.LastInterval = cfg.NewsIntervalMinutes
-    })
+    // Start the bot
+    if err := bot.Start(); err != nil {
+        log.Fatalf("Failed to start bot: %v", err)
+    }
+
+    // Log successful startup
+    log.Printf("Sankarea News Bot v%s is now running", VERSION)
+
+    // Wait for interrupt signal
+    sc := make(chan os.Signal, 1)
+    signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM)
+    <-sc
+
+    // Cleanup and exit
+    log.Println("Shutting down...")
+    bot.Stop()
 }
 
-func performGracefulShutdown(ctx context.Context, discord *discordgo.Session) error {
-    // Update shutdown time
-    if err := UpdateState(func(s *State) {
-        s.ShutdownTime = time.Now()
-    }); err != nil {
-        Logger().Printf("Failed to update shutdown time: %v", err)
+// loadConfig loads the bot configuration from file
+func loadConfig() (*BotConfig, error) {
+    // Try to load from environment first
+    token := os.Getenv("DISCORD_BOT_TOKEN")
+    if token == "" {
+        return nil, fmt.Errorf("DISCORD_BOT_TOKEN environment variable not set")
     }
 
-    // Cleanup tasks
-    var wg sync.WaitGroup
-    errChan := make(chan error, 3)
-
-    // Close Discord connection
-    wg.Add(1)
-    go func() {
-        defer wg.Done()
-        if err := discord.Close(); err != nil {
-            errChan <- fmt.Errorf("discord shutdown error: %v", err)
-        }
-    }()
-
-    // Close database if enabled
-    if cfg.EnableDatabase && db != nil {
-        wg.Add(1)
-        go func() {
-            defer wg.Done()
-            if err := db.Close(); err != nil {
-                errChan <- fmt.Errorf("database shutdown error: %v", err)
-            }
-        }()
+    // Load config file
+    configPath := "config.json"
+    if envConfig := os.Getenv("BOT_CONFIG_PATH"); envConfig != "" {
+        configPath = envConfig
     }
 
-    // Save final state
-    wg.Add(1)
-    go func() {
-        defer wg.Done()
-        if err := SaveState(state); err != nil {
-            errChan <- fmt.Errorf("state save error: %v", err)
-        }
-    }()
-
-    // Wait for all cleanup tasks or context timeout
-    done := make(chan struct{})
-    go func() {
-        wg.Wait()
-        close(done)
-    }()
-
-    select {
-    case <-ctx.Done():
-        return fmt.Errorf("shutdown timed out")
-    case err := <-errChan:
-        return err
-    case <-done:
-        return nil
+    file, err := os.ReadFile(configPath)
+    if err != nil {
+        return nil, fmt.Errorf("failed to read config file: %v", err)
     }
+
+    var config BotConfig
+    if err := json.Unmarshal(file, &config); err != nil {
+        return nil, fmt.Errorf("failed to parse config file: %v", err)
+    }
+
+    // Override token from environment
+    config.Token = token
+
+    // Set defaults if not specified
+    if config.FetchInterval == 0 {
+        config.FetchInterval = 15 // 15 minutes default
+    }
+    if config.MaxPostsPerRun == 0 {
+        config.MaxPostsPerRun = 5
+    }
+    if config.LogLevel == "" {
+        config.LogLevel = "info"
+    }
+    if config.DatabasePath == "" {
+        config.DatabasePath = "data/sankarea.db"
+    }
+    if config.SourcesPath == "" {
+        config.SourcesPath = "config/sources.yml"
+    }
+    if config.CachePath == "" {
+        config.CachePath = "data/cache"
+    }
+
+    return &config, nil
 }
 
-func ready(s *discordgo.Session, r *discordgo.Ready) {
-    Logger().Printf("Logged in as: %s#%s", s.State.User.Username, s.State.User.Discriminator)
-    s.UpdateGameStatus(0, fmt.Sprintf("v%s | /help", botVersion))
+// ensureDirectories creates required directories if they don't exist
+func ensureDirectories(config *BotConfig) error {
+    dirs := []string{
+        filepath.Dir(config.DatabasePath),
+        config.CachePath,
+        "logs",
+    }
+
+    for _, dir := range dirs {
+        if err := os.MkdirAll(dir, 0755); err != nil {
+            return fmt.Errorf("failed to create directory %s: %v", dir, err)
+        }
+    }
+
+    return nil
 }
