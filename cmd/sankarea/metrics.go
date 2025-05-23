@@ -2,200 +2,213 @@
 package main
 
 import (
-    "runtime"
+    "context"
+    "encoding/json"
+    "fmt"
+    "os"
+    "path/filepath"
     "sync"
     "time"
-    
-    "github.com/shirou/gopsutil/v3/cpu"
-    "github.com/shirou/gopsutil/v3/disk"
-    "github.com/shirou/gopsutil/v3/mem"
 )
 
-// Metrics holds system and application metrics
+// Metrics represents collected bot metrics
 type Metrics struct {
-    Timestamp        time.Time `json:"timestamp"`
-    MemoryUsageMB    float64   `json:"memory_usage_mb"`
-    CPUUsagePercent  float64   `json:"cpu_usage_percent"`
-    DiskUsagePercent float64   `json:"disk_usage_percent"`
-    GoroutineCount   int       `json:"goroutine_count"`
-    
-    // Application metrics
-    ArticlesPerMinute float64 `json:"articles_per_minute"`
-    ErrorsPerHour     float64 `json:"errors_per_hour"`
-    APICallsPerHour   float64 `json:"api_calls_per_hour"`
-    UptimeHours       float64 `json:"uptime_hours"`
-    
-    // Cache metrics
-    CacheSize        int     `json:"cache_size"`
-    CacheHitRate     float64 `json:"cache_hit_rate"`
-    
-    // Database metrics
-    DBConnections    int     `json:"db_connections"`
-    DBQueryLatencyMS float64 `json:"db_query_latency_ms"`
+    Timestamp     time.Time         `json:"timestamp"`
+    ArticleCount  int              `json:"article_count"`
+    ErrorCount    int              `json:"error_count"`
+    SourceCount   int              `json:"source_count"`
+    UpTime        time.Duration    `json:"uptime"`
+    CategoryStats map[string]int   `json:"category_stats"`
+    SourceStats   map[string]int   `json:"source_stats"`
+    Reliability   ReliabilityStats `json:"reliability"`
+}
+
+// ReliabilityStats tracks fact-checking statistics
+type ReliabilityStats struct {
+    HighCount    int     `json:"high_count"`
+    MediumCount  int     `json:"medium_count"`
+    LowCount     int     `json:"low_count"`
+    AverageScore float64 `json:"average_score"`
+}
+
+// MetricsManager handles metrics collection and storage
+type MetricsManager struct {
+    mutex       sync.RWMutex
+    metricsPath string
+    current     *Metrics
+    history     []*Metrics
 }
 
 var (
-    metricsMutex sync.RWMutex
-    lastMetrics  *Metrics
-    startTime    = time.Now()
+    metricsManager *MetricsManager
+    metricsOnce    sync.Once
 )
 
-// collectMetrics gathers all system and application metrics
-func collectMetrics() *Metrics {
-    metricsMutex.Lock()
-    defer metricsMutex.Unlock()
+// initMetricsManager initializes the metrics manager
+func initMetricsManager() error {
+    var err error
+    metricsOnce.Do(func() {
+        metricsPath := filepath.Join(cfg.DataDir, "metrics")
+        if err = os.MkdirAll(metricsPath, 0755); err != nil {
+            return
+        }
+
+        metricsManager = &MetricsManager{
+            metricsPath: metricsPath,
+            current: &Metrics{
+                Timestamp:     time.Now(),
+                CategoryStats: make(map[string]int),
+                SourceStats:   make(map[string]int),
+            },
+            history: make([]*Metrics, 0),
+        }
+
+        // Load historical metrics
+        if err = metricsManager.loadHistory(); err != nil {
+            Logger().Printf("Failed to load metrics history: %v", err)
+        }
+    })
+    return err
+}
+
+// CollectMetrics gathers current metrics
+func CollectMetrics(ctx context.Context) error {
+    if metricsManager == nil {
+        if err := initMetricsManager(); err != nil {
+            return fmt.Errorf("failed to initialize metrics manager: %v", err)
+        }
+    }
+
+    state, err := LoadState()
+    if err != nil {
+        return fmt.Errorf("failed to load state for metrics: %v", err)
+    }
+
+    sources, err := LoadSources()
+    if err != nil {
+        return fmt.Errorf("failed to load sources for metrics: %v", err)
+    }
 
     metrics := &Metrics{
-        Timestamp:      time.Now(),
-        GoroutineCount: runtime.NumGoroutine(),
-        UptimeHours:    time.Since(startTime).Hours(),
+        Timestamp:     time.Now().UTC(),
+        ArticleCount:  state.ArticleCount,
+        ErrorCount:    state.ErrorCount,
+        SourceCount:   len(sources),
+        UpTime:        time.Since(state.StartupTime),
+        CategoryStats: make(map[string]int),
+        SourceStats:   make(map[string]int),
     }
 
-    // Collect memory metrics
-    collectMemoryMetrics(metrics)
+    // Collect category and source stats
+    for _, article := range state.RecentArticles {
+        metrics.CategoryStats[article.Category]++
+        metrics.SourceStats[article.Source]++
 
-    // Collect CPU metrics
-    collectCPUMetrics(metrics)
-
-    // Collect disk metrics
-    collectDiskMetrics(metrics)
-
-    // Collect application metrics
-    collectAppMetrics(metrics)
-
-    // Store metrics
-    lastMetrics = metrics
-
-    // Save to database if enabled
-    if cfg.EnableDatabase {
-        go func(m *Metrics) {
-            if err := storeMetrics(m); err != nil {
-                Logger().Printf("Failed to store metrics: %v", err)
+        // Collect reliability stats
+        if article.FactCheckResult != nil {
+            switch article.FactCheckResult.ReliabilityTier {
+            case "High":
+                metrics.Reliability.HighCount++
+            case "Medium":
+                metrics.Reliability.MediumCount++
+            case "Low":
+                metrics.Reliability.LowCount++
             }
-        }(metrics)
-    }
-
-    return metrics
-}
-
-// collectMemoryMetrics gathers memory-related metrics
-func collectMemoryMetrics(metrics *Metrics) {
-    // Runtime memory stats
-    var memStats runtime.MemStats
-    runtime.ReadMemStats(&memStats)
-    metrics.MemoryUsageMB = float64(memStats.Alloc) / 1024 / 1024
-
-    // System memory stats
-    if vmem, err := mem.VirtualMemory(); err == nil {
-        metrics.MemoryUsagePercent = vmem.UsedPercent
-    }
-}
-
-// collectCPUMetrics gathers CPU-related metrics
-func collectCPUMetrics(metrics *Metrics) {
-    if cpuPercent, err := cpu.Percent(time.Second, false); err == nil && len(cpuPercent) > 0 {
-        metrics.CPUUsagePercent = cpuPercent[0]
-    }
-}
-
-// collectDiskMetrics gathers disk-related metrics
-func collectDiskMetrics(metrics *Metrics) {
-    if usage, err := disk.Usage("."); err == nil {
-        metrics.DiskUsagePercent = usage.UsedPercent
-    }
-}
-
-// collectAppMetrics gathers application-specific metrics
-func collectAppMetrics(metrics *Metrics) {
-    state := GetState()
-    now := time.Now()
-
-    // Calculate articles per minute
-    timeWindow := now.Add(-time.Hour)
-    articles, _ := getArticlesInTimeRange(timeWindow, now)
-    metrics.ArticlesPerMinute = float64(len(articles)) / 60
-
-    // Calculate errors per hour
-    metrics.ErrorsPerHour = float64(state.ErrorCount)
-
-    // Database metrics if enabled
-    if cfg.EnableDatabase && db != nil {
-        metrics.DBConnections = db.Stats().OpenConnections
-        metrics.DBQueryLatencyMS = calculateAverageQueryLatency()
-    }
-
-    // Cache metrics
-    metrics.CacheSize = len(processor.cache)
-    metrics.CacheHitRate = calculateCacheHitRate()
-}
-
-// getArticlesInTimeRange retrieves articles within a time range
-func getArticlesInTimeRange(start, end time.Time) ([]Article, error) {
-    if !cfg.EnableDatabase || db == nil {
-        return nil, ErrDatabaseNotInitialized
-    }
-
-    query := `
-        SELECT *
-        FROM articles
-        WHERE timestamp BETWEEN $1 AND $2
-    `
-
-    var articles []Article
-    err := db.Select(&articles, query, start, end)
-    return articles, err
-}
-
-// calculateAverageQueryLatency calculates average database query latency
-func calculateAverageQueryLatency() float64 {
-    if !cfg.EnableDatabase || db == nil {
-        return 0
-    }
-
-    // Execute a simple query to measure latency
-    start := time.Now()
-    db.Query("SELECT 1")
-    return float64(time.Since(start).Milliseconds())
-}
-
-// calculateCacheHitRate calculates the cache hit rate
-func calculateCacheHitRate() float64 {
-    if processor == nil {
-        return 0
-    }
-
-    totalRequests := float64(processor.cacheHits + processor.cacheMisses)
-    if totalRequests == 0 {
-        return 0
-    }
-
-    return float64(processor.cacheHits) / totalRequests * 100
-}
-
-// GetLastMetrics returns the most recently collected metrics
-func GetLastMetrics() *Metrics {
-    metricsMutex.RLock()
-    defer metricsMutex.RUnlock()
-    
-    if lastMetrics == nil {
-        return collectMetrics()
-    }
-    return lastMetrics
-}
-
-// StartMetricsCollection begins periodic metrics collection
-func StartMetricsCollection(interval time.Duration) {
-    go func() {
-        ticker := time.NewTicker(interval)
-        defer ticker.Stop()
-
-        for {
-            select {
-            case <-ticker.C:
-                collectMetrics()
-            case <-ctx.Done():
-                return
-            }
+            metrics.Reliability.AverageScore += article.FactCheckResult.Score
         }
-    }()
+    }
+
+    // Calculate average reliability score
+    totalChecked := metrics.Reliability.HighCount + metrics.Reliability.MediumCount + metrics.Reliability.LowCount
+    if totalChecked > 0 {
+        metrics.Reliability.AverageScore /= float64(totalChecked)
+    }
+
+    // Update current metrics
+    metricsManager.mutex.Lock()
+    metricsManager.current = metrics
+    metricsManager.history = append(metricsManager.history, metrics)
+    metricsManager.mutex.Unlock()
+
+    // Save metrics
+    if err := metricsManager.saveMetrics(metrics); err != nil {
+        return fmt.Errorf("failed to save metrics: %v", err)
+    }
+
+    return nil
+}
+
+// GetCurrentMetrics returns the most recent metrics
+func GetCurrentMetrics() *Metrics {
+    metricsManager.mutex.RLock()
+    defer metricsManager.mutex.RUnlock()
+    return metricsManager.current
+}
+
+// GetMetricsHistory returns historical metrics for the specified duration
+func GetMetricsHistory(duration time.Duration) []*Metrics {
+    metricsManager.mutex.RLock()
+    defer metricsManager.mutex.RUnlock()
+
+    cutoff := time.Now().Add(-duration)
+    var filtered []*Metrics
+
+    for _, m := range metricsManager.history {
+        if m.Timestamp.After(cutoff) {
+            filtered = append(filtered, m)
+        }
+    }
+
+    return filtered
+}
+
+// saveMetrics saves metrics to disk
+func (mm *MetricsManager) saveMetrics(metrics *Metrics) error {
+    filename := filepath.Join(mm.metricsPath, 
+        fmt.Sprintf("metrics_%s.json", metrics.Timestamp.Format("2006-01-02")))
+
+    data, err := json.MarshalIndent(metrics, "", "  ")
+    if err != nil {
+        return fmt.Errorf("failed to marshal metrics: %v", err)
+    }
+
+    if err := os.WriteFile(filename, data, 0644); err != nil {
+        return fmt.Errorf("failed to write metrics file: %v", err)
+    }
+
+    return nil
+}
+
+// loadHistory loads historical metrics from disk
+func (mm *MetricsManager) loadHistory() error {
+    files, err := os.ReadDir(mm.metricsPath)
+    if err != nil {
+        return fmt.Errorf("failed to read metrics directory: %v", err)
+    }
+
+    for _, file := range files {
+        if !file.IsDir() && filepath.Ext(file.Name()) == ".json" {
+            path := filepath.Join(mm.metricsPath, file.Name())
+            data, err := os.ReadFile(path)
+            if err != nil {
+                Logger().Printf("Failed to read metrics file %s: %v", path, err)
+                continue
+            }
+
+            var metrics Metrics
+            if err := json.Unmarshal(data, &metrics); err != nil {
+                Logger().Printf("Failed to unmarshal metrics from %s: %v", path, err)
+                continue
+            }
+
+            mm.history = append(mm.history, &metrics)
+        }
+    }
+
+    // Sort history by timestamp
+    sort.Slice(mm.history, func(i, j int) bool {
+        return mm.history[i].Timestamp.Before(mm.history[j].Timestamp)
+    })
+
+    return nil
 }
