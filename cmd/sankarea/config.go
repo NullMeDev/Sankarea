@@ -1,242 +1,235 @@
+// cmd/sankarea/config.go
 package main
 
 import (
-	"encoding/json"
-	"fmt"
-	"os"
-	"path/filepath"
+    "encoding/json"
+    "fmt"
+    "os"
+    "path/filepath"
+    "sync"
+    "time"
 
-	"gopkg.in/yaml.v2"
+    "gopkg.in/yaml.v2"
 )
 
-// Config file paths
+// ConfigPaths contains default configuration file paths
 const (
-	configFilePath = "config/config.json"
-	sourcesFilePath = "config/sources.yml"
+    DefaultConfigPath   = "config/config.json"
+    DefaultSourcesPath = "config/sources.yml"
+    DefaultStatePath   = "data/state.json"
+    DefaultDataDir     = "data"
+    DefaultLogDir      = "data/logs"
 )
 
-// LoadConfig loads the application configuration from disk
-func LoadConfig() (*Config, error) {
-	// Create config file if it doesn't exist
-	if _, err := os.Stat(configFilePath); os.IsNotExist(err) {
-		// Create default config
-		defaultConfig := &Config{
-			Version:             VERSION,
-			NewsIntervalMinutes: 15,
-			News15MinCron:       "*/15 * * * *",
-			MaxPostsPerSource:   5,
-			EnableImageEmbed:    true,
-			UserAgentString:     "Sankarea RSS Bot v" + VERSION,
-			FetchNewsOnStartup:  true,
-			DigestCronSchedule:  "0 8 * * *",
-			DashboardPort:       8080,
-		}
-		
-		// Create directory if needed
-		if err := os.MkdirAll(filepath.Dir(configFilePath), 0755); err != nil {
-			return defaultConfig, err
-		}
-		
-		// Save default config
-		if err := SaveConfig(defaultConfig); err != nil {
-			return defaultConfig, err
-		}
-		
-		return defaultConfig, nil
-	}
-	
-	// Read existing config file
-	data, err := os.ReadFile(configFilePath)
-	if err != nil {
-		return nil, err
-	}
-	
-	// Parse config
-	var config Config
-	if err := json.Unmarshal(data, &config); err != nil {
-		return nil, err
-	}
-	
-	// Load environment variables (overrides file settings)
-	config.BotToken = getEnvOrValue(config.BotToken, "DISCORD_BOT_TOKEN")
-	config.AppID = getEnvOrValue(config.AppID, "DISCORD_APPLICATION_ID")
-	config.GuildID = getEnvOrValue(config.GuildID, "DISCORD_GUILD_ID")
-	config.NewsChannelID = getEnvOrValue(config.NewsChannelID, "DISCORD_CHANNEL_ID")
-	
-	// If version is missing, set it
-	if config.Version == "" {
-		config.Version = VERSION
-	}
-	
-	// Enforce minimum values
-	if config.NewsIntervalMinutes < 5 {
-		config.NewsIntervalMinutes = 5
-	}
-	if config.MaxPostsPerSource < 1 {
-		config.MaxPostsPerSource = 5
-	}
-	
-	return &config, nil
+// Config validation constants
+const (
+    MinNewsInterval     = 5
+    MaxNewsInterval     = 120
+    MinPostsPerSource   = 1
+    MaxPostsPerSource   = 50
+    MaxSources         = 100
+)
+
+var (
+    configMutex sync.RWMutex
+    cfg         *Config
+)
+
+// loadConfiguration loads and validates the configuration
+func loadConfiguration(configPath string) error {
+    configMutex.Lock()
+    defer configMutex.Unlock()
+
+    // Ensure config directory exists
+    configDir := filepath.Dir(configPath)
+    if err := os.MkdirAll(configDir, 0755); err != nil {
+        return fmt.Errorf("failed to create config directory: %v", err)
+    }
+
+    // Read config file
+    data, err := os.ReadFile(configPath)
+    if err != nil {
+        if os.IsNotExist(err) {
+            // Create default config if it doesn't exist
+            cfg = getDefaultConfig()
+            return saveConfiguration(configPath)
+        }
+        return fmt.Errorf("failed to read config file: %v", err)
+    }
+
+    // Parse config
+    cfg = &Config{}
+    if err := json.Unmarshal(data, cfg); err != nil {
+        return fmt.Errorf("failed to parse config file: %v", err)
+    }
+
+    // Validate and set defaults
+    if err := validateConfig(cfg); err != nil {
+        return fmt.Errorf("invalid configuration: %v", err)
+    }
+
+    // Ensure required directories exist
+    if err := createRequiredDirectories(); err != nil {
+        return fmt.Errorf("failed to create required directories: %v", err)
+    }
+
+    return nil
 }
 
-// SaveConfig saves the application configuration to disk
-func SaveConfig(cfg *Config) error {
-	// Marshal config to JSON
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return err
-	}
-	
-	// Create directory if needed
-	if err := os.MkdirAll(filepath.Dir(configFilePath), 0755); err != nil {
-		return err
-	}
-	
-	// Save config
-	return os.WriteFile(configFilePath, data, 0644)
+// saveConfiguration saves the current configuration
+func saveConfiguration(configPath string) error {
+    configMutex.Lock()
+    defer configMutex.Unlock()
+
+    data, err := json.MarshalIndent(cfg, "", "  ")
+    if err != nil {
+        return fmt.Errorf("failed to marshal config: %v", err)
+    }
+
+    if err := os.WriteFile(configPath, data, 0644); err != nil {
+        return fmt.Errorf("failed to write config file: %v", err)
+    }
+
+    return nil
 }
 
-// getEnvOrValue returns the environment variable value or the default value
-func getEnvOrValue(defaultValue, envKey string) string {
-	if value, exists := os.LookupEnv(envKey); exists && value != "" {
-		return value
-	}
-	return defaultValue
+// getDefaultConfig returns a default configuration
+func getDefaultConfig() *Config {
+    return &Config{
+        Version:              "1.0.0",
+        NewsIntervalMinutes:  15,
+        MaxPostsPerSource:    10,
+        News15MinCron:        "*/15 * * * *",
+        DigestCronSchedule:   "0 0 * * *", // Daily at midnight
+        EnableImageEmbed:     true,
+        EnableFactCheck:      false,
+        EnableSummarization: false,
+        EnableDatabase:      false,
+        EnableDashboard:     true,
+        DashboardPort:       8080,
+        HealthAPIPort:       8081,
+        UserAgentString:     "Sankarea News Bot/1.0",
+        FetchNewsOnStartup:  true,
+    }
 }
 
-// LoadSources loads news sources from disk
-func LoadSources() ([]Source, error) {
-	// Check if file exists, create if not
-	if _, err := os.Stat(sourcesFilePath); os.IsNotExist(err) {
-		if err := os.MkdirAll(filepath.Dir(sourcesFilePath), 0755); err != nil {
-			return nil, err
-		}
-		
-		// Create empty file with empty YAML sources array
-		if err := os.WriteFile(sourcesFilePath, []byte("sources: []"), 0644); err != nil {
-			return nil, err
-		}
-		
-		return []Source{}, nil
-	}
-	
-	// Read sources file
-	data, err := os.ReadFile(sourcesFilePath)
-	if err != nil {
-		return nil, err
-	}
-	
-	var sources struct {
-		Sources []Source `yaml:"sources"`
-	}
-	
-	if err := yaml.Unmarshal(data, &sources); err != nil {
-		// Try with direct unmarshaling if the structure doesn't match
-		var directSources []Source
-		if err := yaml.Unmarshal(data, &directSources); err != nil {
-			return nil, fmt.Errorf("failed to parse sources file: %w", err)
-		}
-		sources.Sources = directSources
-	}
-	
-	// Ensure all sources have active flag set properly
-	for i := range sources.Sources {
-		if !sources.Sources[i].Paused && sources.Sources[i].Active == false {
-			sources.Sources[i].Active = true
-		}
-	}
-	
-	return sources.Sources, nil
+// validateConfig validates the configuration and sets defaults
+func validateConfig(cfg *Config) error {
+    if cfg.BotToken == "" {
+        return fmt.Errorf("bot token is required")
+    }
+
+    if cfg.AppID == "" {
+        return fmt.Errorf("application ID is required")
+    }
+
+    // Validate intervals
+    if cfg.NewsIntervalMinutes < MinNewsInterval || cfg.NewsIntervalMinutes > MaxNewsInterval {
+        return fmt.Errorf("news interval must be between %d and %d minutes", MinNewsInterval, MaxNewsInterval)
+    }
+
+    if cfg.MaxPostsPerSource < MinPostsPerSource || cfg.MaxPostsPerSource > MaxPostsPerSource {
+        return fmt.Errorf("max posts per source must be between %d and %d", MinPostsPerSource, MaxPostsPerSource)
+    }
+
+    // Set defaults if not specified
+    if cfg.UserAgentString == "" {
+        cfg.UserAgentString = fmt.Sprintf("Sankarea News Bot/%s", cfg.Version)
+    }
+
+    if cfg.DashboardPort == 0 {
+        cfg.DashboardPort = 8080
+    }
+
+    if cfg.HealthAPIPort == 0 {
+        cfg.HealthAPIPort = 8081
+    }
+
+    return nil
 }
 
-// SaveSources saves news sources to disk
-func SaveSources(sources []Source) error {
-	// Create wrapper structure
-	wrapper := struct {
-		Sources []Source `yaml:"sources"`
-	}{
-		Sources: sources,
-	}
-	
-	// Marshal to YAML
-	data, err := yaml.Marshal(wrapper)
-	if err != nil {
-		return err
-	}
-	
-	// Create directory if needed
-	if err := os.MkdirAll(filepath.Dir(sourcesFilePath), 0755); err != nil {
-		return err
-	}
-	
-	// Save file
-	return os.WriteFile(sourcesFilePath, data, 0644)
+// createRequiredDirectories ensures all required directories exist
+func createRequiredDirectories() error {
+    dirs := []string{
+        DefaultDataDir,
+        DefaultLogDir,
+        filepath.Dir(DefaultConfigPath),
+        filepath.Dir(DefaultSourcesPath),
+    }
+
+    for _, dir := range dirs {
+        if err := os.MkdirAll(dir, 0755); err != nil {
+            return fmt.Errorf("failed to create directory %s: %v", dir, err)
+        }
+    }
+
+    return nil
 }
 
-// AddOrUpdateSource adds a new source or updates an existing one
-func AddOrUpdateSource(source Source) error {
-	sources, err := LoadSources()
-	if err != nil {
-		return err
-	}
-	
-	// Check if source already exists
-	found := false
-	for i, s := range sources {
-		if s.Name == source.Name {
-			sources[i] = source
-			found = true
-			break
-		}
-	}
-	
-	// Add new source if not found
-	if !found {
-		sources = append(sources, source)
-	}
-	
-	return SaveSources(sources)
+// loadSources loads the news sources configuration
+func loadSources() []Source {
+    configMutex.RLock()
+    defer configMutex.RUnlock()
+
+    data, err := os.ReadFile(DefaultSourcesPath)
+    if err != nil {
+        Logger().Printf("Failed to read sources file: %v", err)
+        return []Source{}
+    }
+
+    var sources []Source
+    if err := yaml.Unmarshal(data, &sources); err != nil {
+        Logger().Printf("Failed to parse sources file: %v", err)
+        return []Source{}
+    }
+
+    // Validate source count
+    if len(sources) > MaxSources {
+        Logger().Printf("Warning: Number of sources (%d) exceeds maximum (%d)", len(sources), MaxSources)
+        sources = sources[:MaxSources]
+    }
+
+    return sources
 }
 
-// RemoveSource removes a source by name
-func RemoveSource(name string) error {
-	sources, err := LoadSources()
-	if err != nil {
-		return err
-	}
-	
-	// Find and remove source
-	for i, s := range sources {
-		if s.Name == name {
-			// Remove this source
-			sources = append(sources[:i], sources[i+1:]...)
-			break
-		}
-	}
-	
-	return SaveSources(sources)
+// saveSources saves the news sources configuration
+func saveSources(sources []Source) error {
+    configMutex.Lock()
+    defer configMutex.Unlock()
+
+    // Update last modified time
+    for i := range sources {
+        sources[i].LastFetched = time.Now()
+    }
+
+    data, err := yaml.Marshal(sources)
+    if err != nil {
+        return fmt.Errorf("failed to marshal sources: %v", err)
+    }
+
+    if err := os.WriteFile(DefaultSourcesPath, data, 0644); err != nil {
+        return fmt.Errorf("failed to write sources file: %v", err)
+    }
+
+    return nil
 }
 
-// UpdateSourceStatus updates a source's paused status
-func UpdateSourceStatus(name string, paused bool) error {
-	sources, err := LoadSources()
-	if err != nil {
-		return err
-	}
-	
-	// Find and update source
-	found := false
-	for i, s := range sources {
-		if s.Name == name {
-			sources[i].Paused = paused
-			found = true
-			break
-		}
-	}
-	
-	if !found {
-		return fmt.Errorf("source %s not found", name)
-	}
-	
-	return SaveSources(sources)
+// GetConfig returns a copy of the current configuration
+func GetConfig() Config {
+    configMutex.RLock()
+    defer configMutex.RUnlock()
+    return *cfg
+}
+
+// UpdateConfig updates the configuration with new values
+func UpdateConfig(updater func(*Config)) error {
+    configMutex.Lock()
+    defer configMutex.Unlock()
+
+    updater(cfg)
+    if err := validateConfig(cfg); err != nil {
+        return err
+    }
+
+    return saveConfiguration(DefaultConfigPath)
 }
