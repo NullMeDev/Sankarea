@@ -1,372 +1,187 @@
+// cmd/sankarea/types.go
 package main
 
 import (
-	"net/http"
-	"os"
-	"sync"
-	"time"
+    "encoding/json"
+    "time"
 
-	"github.com/bwmarrin/discordgo"
-	"github.com/robfig/cron/v3"
+    "github.com/bwmarrin/discordgo"
 )
 
-// Source represents a news source
-type Source struct {
-	Name            string    `json:"name" yaml:"name"`
-	URL             string    `json:"url" yaml:"url"`
-	Category        string    `json:"category" yaml:"category"`
-	Description     string    `json:"description" yaml:"description"`
-	Bias           string     `json:"bias" yaml:"bias"`
-	TrustScore     float64    `json:"trustScore" yaml:"trustScore"`
-	ChannelOverride string    `json:"channelOverride" yaml:"channelOverride"`
-	Paused         bool       `json:"paused" yaml:"paused"`
-	Active         bool       `json:"active" yaml:"active"`
-	Tags           []string   `json:"tags" yaml:"tags"`
-	LastFetched    time.Time  `json:"lastFetched" yaml:"lastFetched"`
-	LastError      string     `json:"lastError" yaml:"lastError"`
-	LastErrorTime  time.Time  `json:"lastErrorTime" yaml:"lastErrorTime"`
-	ErrorCount     int        `json:"errorCount" yaml:"errorCount"`
-	FeedCount      int        `json:"feedCount" yaml:"feedCount"`
-	UptimePercent  float64    `json:"uptimePercent" yaml:"uptimePercent"`
-	AvgResponseTime int64     `json:"avgResponseTime" yaml:"avgResponseTime"`
+// NewsArticle represents a news article
+type NewsArticle struct {
+    ID          string    `json:"id"`
+    Title       string    `json:"title"`
+    URL         string    `json:"url"`
+    Source      string    `json:"source"`
+    PublishedAt time.Time `json:"published_at"`
+    FetchedAt   time.Time `json:"fetched_at"`
+    Summary     string    `json:"summary"`
+    Category    string    `json:"category"`
+    Tags        []string  `json:"tags"`
+    ImageURL    string    `json:"image_url,omitempty"`
+}
+
+// NewsDigest represents a collection of news articles
+type NewsDigest struct {
+    Articles    []*NewsArticle `json:"articles"`
+    GeneratedAt time.Time      `json:"generated_at"`
+    Period      string         `json:"period"`
+}
+
+// Metrics represents application metrics
+type Metrics struct {
+    UptimeSeconds     float64            `json:"uptime_seconds"`
+    MemoryUsageMB     float64            `json:"memory_usage_mb"`
+    CPUUsagePercent   float64            `json:"cpu_usage_percent"`
+    DiskUsagePercent  float64            `json:"disk_usage_percent"`
+    ArticlesPerMinute float64            `json:"articles_per_minute"`
+    ErrorsPerHour     float64            `json:"errors_per_hour"`
+    APICallsPerHour   float64            `json:"api_calls_per_hour"`
+    ConnectedGuilds   int                `json:"connected_guilds"`
+    ActiveSources     int                `json:"active_sources"`
+    HealthStatus      string             `json:"health_status"`
+    ComponentStatuses map[string]string  `json:"component_statuses"`
 }
 
 // Config represents the application configuration
 type Config struct {
-	Version              string   `json:"version"`
-	BotToken             string   `json:"botToken"`
-	AppID                string   `json:"appId"`
-	GuildID              string   `json:"guildId"`
-	OwnerIDs             []string `json:"ownerIds"`
-	NewsChannelID        string   `json:"newsChannelId"`
-	ErrorChannelID       string   `json:"errorChannelId"`
-	NewsIntervalMinutes  int      `json:"newsIntervalMinutes"`
-	News15MinCron        string   `json:"news15MinCron"`
-	DigestCronSchedule   string   `json:"digestCronSchedule"`
-	MaxPostsPerSource    int      `json:"maxPostsPerSource"`
-	EnableImageEmbed     bool     `json:"enableImageEmbed"`
-	EnableFactCheck      bool     `json:"enableFactCheck"`
-	EnableSummarization  bool     `json:"enableSummarization"`
-	EnableContentFiltering bool   `json:"enableContentFiltering"`
-	EnableKeywordTracking bool    `json:"enableKeywordTracking"`
-	EnableDatabase       bool     `json:"enableDatabase"`
-	EnableDashboard      bool     `json:"enableDashboard"`
-	DashboardPort        int      `json:"dashboardPort"`
-	HealthAPIPort        int      `json:"healthApiPort"`
-	UserAgentString      string   `json:"userAgentString"`
-	FetchNewsOnStartup   bool     `json:"fetchNewsOnStartup"`
-	GoogleFactCheckAPIKey string  `json:"googleFactCheckApiKey"`
-	ClaimBustersAPIKey    string  `json:"claimBustersApiKey"`
+    // Discord configuration
+    Token           string   `json:"token"`
+    OwnerIDs       []string `json:"owner_ids"`
+    CommandPrefix   string   `json:"command_prefix"`
+    StatusMessage   string   `json:"status_message"`
+    DefaultChannel  string   `json:"default_channel"`
+    
+    // News configuration
+    NewsAPIKey     string            `json:"news_api_key"`
+    NewsSources    []string          `json:"news_sources"`
+    UpdateInterval time.Duration     `json:"update_interval"`
+    Categories     map[string]string `json:"categories"`
+    
+    // Database configuration
+    DatabaseURL    string `json:"database_url"`
+    DatabaseName   string `json:"database_name"`
+    
+    // API configuration
+    APIPort        int    `json:"api_port"`
+    APITokens      map[string]APIToken `json:"api_tokens"`
+    
+    // Logging configuration
+    LogLevel       string `json:"log_level"`
+    LogFile        string `json:"log_file"`
+    
+    // Feature flags
+    Features       map[string]bool `json:"features"`
+    
+    // Version information
+    Version        string `json:"version"`
+    BuildTime      string `json:"build_time"`
+    GitCommit      string `json:"git_commit"`
 }
 
-// State represents the application state
-type State struct {
-	Paused         bool      `json:"paused"`
-	PausedBy       string    `json:"pausedBy"`
-	LastFetchTime  time.Time `json:"lastFetchTime"`
-	LastDigest     time.Time `json:"lastDigest"`
-	NewsNextTime   time.Time `json:"newsNextTime"`
-	DigestNextTime time.Time `json:"digestNextTime"`
-	StartupTime    time.Time `json:"startupTime"`
-	ShutdownTime   time.Time `json:"shutdownTime"`
-	Version        string    `json:"version"`
-	FeedCount      int       `json:"feedCount"`
-	DigestCount    int       `json:"digestCount"`
-	ErrorCount     int       `json:"errorCount"`
-	TotalArticles  int       `json:"totalArticles"`
-	TotalErrors    int       `json:"totalErrors"`
-	TotalAPICalls  int       `json:"totalApiCalls"`
-	LastError      string    `json:"lastError"`
-	LastErrorTime  time.Time `json:"lastErrorTime"`
-	LastInterval   int       `json:"lastInterval"`
-	Lockdown       bool      `json:"lockdown"`
-	LockdownSetBy  string    `json:"lockdownSetBy"`
+// APIToken represents an API access token
+type APIToken struct {
+    Name        string    `json:"name"`
+    Token       string    `json:"token"`
+    Permissions []string  `json:"permissions"`
+    CreatedAt   time.Time `json:"created_at"`
+    ExpiresAt   time.Time `json:"expires_at,omitempty"`
 }
 
-// ImageDownloader handles downloading and caching images from feeds
-type ImageDownloader struct {
-	cacheDir string
-	client   *http.Client
-	mutex    sync.Mutex
+// GuildConfig represents per-guild configuration
+type GuildConfig struct {
+    GuildID          string            `json:"guild_id"`
+    NewsChannel      string            `json:"news_channel"`
+    DigestChannel    string            `json:"digest_channel"`
+    DigestSchedule   string            `json:"digest_schedule"`
+    EnabledSources   []string          `json:"enabled_sources"`
+    CategoryChannels map[string]string `json:"category_channels"`
+    Prefix          string            `json:"prefix"`
+    Language        string            `json:"language"`
+    Timezone        string            `json:"timezone"`
+    UpdatedAt       time.Time         `json:"updated_at"`
 }
 
-// NewImageDownloader creates a new image downloader
-func NewImageDownloader() *ImageDownloader {
-	return &ImageDownloader{
-		cacheDir: "data/images",
-		client: &http.Client{
-			Timeout: 30 * time.Second,
-		},
-	}
+// CommandContext represents the context for command execution
+type CommandContext struct {
+    Session     *discordgo.Session
+    Interaction *discordgo.InteractionCreate
+    Guild       *GuildConfig
+    User        *discordgo.User
+    Command     string
+    Args        []string
+    RawArgs     string
 }
 
-// Initialize sets up the image downloader
-func (id *ImageDownloader) Initialize() error {
-	return os.MkdirAll(id.cacheDir, 0755)
+// ScheduledTask represents a scheduled task
+type ScheduledTask struct {
+    ID          string          `json:"id"`
+    Type        string          `json:"type"`
+    Schedule    string          `json:"schedule"`
+    LastRun     time.Time       `json:"last_run"`
+    NextRun     time.Time       `json:"next_run"`
+    Parameters  map[string]any  `json:"parameters"`
+    Enabled     bool            `json:"enabled"`
 }
 
-// UserFilterManager handles user-specific news filtering
-type UserFilterManager struct {
-	filterDir string
-	filters   map[string]*UserFilter
-	mutex     sync.RWMutex
+// APIResponse represents a standardized API response
+type APIResponse struct {
+    Success bool            `json:"success"`
+    Data    interface{}     `json:"data,omitempty"`
+    Error   *APIError       `json:"error,omitempty"`
+    Meta    *APIMetadata    `json:"meta,omitempty"`
 }
 
-// UserFilter represents a user's news filtering preferences
-type UserFilter struct {
-	UserID           string            `json:"userId"`
-	DisabledSources  []string          `json:"disabledSources"`
-	DisabledCategories []string        `json:"disabledCategories"`
-	IncludeKeywords  []string          `json:"includeKeywords"`
-	ExcludeKeywords  []string          `json:"excludeKeywords"`
-	LastUpdated      time.Time         `json:"lastUpdated"`
+// APIError represents an API error response
+type APIError struct {
+    Code    string `json:"code"`
+    Message string `json:"message"`
+    Details string `json:"details,omitempty"`
 }
 
-// NewUserFilterManager creates a new user filter manager
-func NewUserFilterManager() *UserFilterManager {
-	return &UserFilterManager{
-		filterDir: "data/user_filters",
-		filters:   make(map[string]*UserFilter),
-	}
+// APIMetadata represents metadata for API responses
+type APIMetadata struct {
+    Page       int       `json:"page,omitempty"`
+    PerPage    int       `json:"per_page,omitempty"`
+    TotalPages int       `json:"total_pages,omitempty"`
+    TotalItems int       `json:"total_items,omitempty"`
+    Timestamp  time.Time `json:"timestamp"`
 }
 
-// Initialize loads all user filters
-func (ufm *UserFilterManager) Initialize() error {
-	return os.MkdirAll(ufm.filterDir, 0755)
+// Custom JSON marshaling/unmarshaling for Config
+func (c *Config) UnmarshalJSON(data []byte) error {
+    type Alias Config
+    aux := &struct {
+        UpdateInterval string `json:"update_interval"`
+        *Alias
+    }{
+        Alias: (*Alias)(c),
+    }
+    
+    if err := json.Unmarshal(data, &aux); err != nil {
+        return err
+    }
+    
+    // Parse update interval
+    if aux.UpdateInterval != "" {
+        duration, err := time.ParseDuration(aux.UpdateInterval)
+        if err != nil {
+            return err
+        }
+        c.UpdateInterval = duration
+    }
+    
+    return nil
 }
 
-// HealthMonitor tracks system health
-type HealthMonitor struct {
-	client *http.Client
-	ticker *time.Ticker
-	mutex  sync.Mutex
-}
-
-// NewHealthMonitor creates a new health monitor
-func NewHealthMonitor() *HealthMonitor {
-	return &HealthMonitor{
-		client: &http.Client{
-			Timeout: 10 * time.Second,
-		},
-	}
-}
-
-// StartPeriodicChecks begins periodic health checks
-func (hm *HealthMonitor) StartPeriodicChecks(interval time.Duration) {
-	hm.ticker = time.NewTicker(interval)
-	go func() {
-		defer RecoverFromPanic("health-monitor")
-		for range hm.ticker.C {
-			hm.PerformChecks()
-		}
-	}()
-}
-
-// StopChecks stops the health check ticker
-func (hm *HealthMonitor) StopChecks() {
-	if hm.ticker != nil {
-		hm.ticker.Stop()
-	}
-}
-
-// PerformChecks runs health checks on various components
-func (hm *HealthMonitor) PerformChecks() {
-	// In a real implementation, this would check various system metrics
-	// and report issues to the error system
-}
-
-// KeywordTracker tracks news keywords
-type KeywordTracker struct {
-	dataFile     string
-	keywords     map[string]*KeywordStats
-	mutex        sync.RWMutex
-}
-
-// KeywordStats tracks statistics for a keyword
-type KeywordStats struct {
-	Keyword      string    `json:"keyword"`
-	Count        int       `json:"count"`
-	LastSeen     time.Time `json:"lastSeen"`
-	Sources      []string  `json:"sources"`
-	Categories   []string  `json:"categories"`
-}
-
-// NewKeywordTracker creates a new keyword tracker
-func NewKeywordTracker() *KeywordTracker {
-	return &KeywordTracker{
-		dataFile: "data/keywords.json",
-		keywords: make(map[string]*KeywordStats),
-	}
-}
-
-// Initialize loads keyword tracking data
-func (kt *KeywordTracker) Initialize() error {
-	// In a real implementation, this would load keywords from JSON
-	return nil
-}
-
-// Save persists keyword data
-func (kt *KeywordTracker) Save() error {
-	// In a real implementation, this would save keywords to JSON
-	return nil
-}
-
-// CheckForKeywords scans text for tracked keywords
-func (kt *KeywordTracker) CheckForKeywords(text string) {
-	// In a real implementation, this would check for matches
-}
-
-// DigestManager handles digest creation and scheduling
-type DigestManager struct {
-	cronSchedule  string
-	cronJob       cron.EntryID
-	mutex         sync.Mutex
-}
-
-// NewDigestManager creates a new digest manager
-func NewDigestManager() *DigestManager {
-	return &DigestManager{
-		cronSchedule: "0 8 * * *", // Default to 8 AM daily
-	}
-}
-
-// StartScheduler starts the digest scheduler
-func (dm *DigestManager) StartScheduler(s *discordgo.Session) error {
-	// In a real implementation, this would add a cron job
-	return nil
-}
-
-// LanguageManager handles translations
-type LanguageManager struct {
-	translations map[string]map[string]string
-	mutex        sync.RWMutex
-}
-
-// NewLanguageManager creates a new language manager
-func NewLanguageManager() *LanguageManager {
-	return &LanguageManager{
-		translations: make(map[string]map[string]string),
-	}
-}
-
-// Initialize loads translation data
-func (lm *LanguageManager) Initialize() error {
-	// In a real implementation, this would load translations
-	return nil
-}
-
-// CredibilityScorer scores news source credibility
-type CredibilityScorer struct {
-	scores map[string]float64
-	mutex  sync.RWMutex
-}
-
-// NewCredibilityScorer creates a new credibility scorer
-func NewCredibilityScorer() *CredibilityScorer {
-	return &CredibilityScorer{
-		scores: make(map[string]float64),
-	}
-}
-
-// Initialize loads credibility data
-func (cs *CredibilityScorer) Initialize() error {
-	// In a real implementation, this would load credibility data
-	return nil
-}
-
-// Save persists credibility scores
-func (cs *CredibilityScorer) Save() error {
-	// In a real implementation, this would save credibility data
-	return nil
-}
-
-// AnalyticsEngine tracks bot usage
-type AnalyticsEngine struct {
-	dataDir string
-	mutex   sync.Mutex
-}
-
-// NewAnalyticsEngine creates a new analytics engine
-func NewAnalyticsEngine() *AnalyticsEngine {
-	return &AnalyticsEngine{
-		dataDir: "data/analytics",
-	}
-}
-
-// Initialize sets up the analytics engine
-func (ae *AnalyticsEngine) Initialize() error {
-	return os.MkdirAll(ae.dataDir, 0755)
-}
-
-// Save persists analytics data
-func (ae *AnalyticsEngine) Save() error {
-	// In a real implementation, this would save analytics data
-	return nil
-}
-
-// ConfigManager handles automatic configuration reloading
-type ConfigManager struct {
-	configPath   string
-	interval     time.Duration
-	ticker       *time.Ticker
-	reloadFunc   func(*Config)
-	mutex        sync.Mutex
-}
-
-// NewConfigManager creates a new config manager
-func NewConfigManager(configPath string, interval time.Duration) (*ConfigManager, error) {
-	if interval < time.Second {
-		interval = time.Minute
-	}
-	
-	return &ConfigManager{
-		configPath: configPath,
-		interval:   interval,
-	}, nil
-}
-
-// SetReloadHandler sets the function to call when config is reloaded
-func (cm *ConfigManager) SetReloadHandler(fn func(*Config)) {
-	cm.mutex.Lock()
-	defer cm.mutex.Unlock()
-	cm.reloadFunc = fn
-}
-
-// StartWatching begins watching the config file for changes
-func (cm *ConfigManager) StartWatching() {
-	cm.ticker = time.NewTicker(cm.interval)
-	go func() {
-		defer RecoverFromPanic("config-manager")
-		for range cm.ticker.C {
-			cm.checkConfigChanged()
-		}
-	}()
-}
-
-// StopWatching stops watching the config file
-func (cm *ConfigManager) StopWatching() {
-	if cm.ticker != nil {
-		cm.ticker.Stop()
-	}
-}
-
-// checkConfigChanged checks if the config file has changed
-func (cm *ConfigManager) checkConfigChanged() {
-	// In a real implementation, this would check file modification time
-	// and reload the config if it has changed
-}
-
-// Functions implemented elsewhere but referenced in types.go
-func StartHealthServer(port int) {
-	// Implementation in dashboard.go
-}
-
-func StartDashboard() error {
-	// Implementation in dashboard.go
-	return nil
-}
-
-func InitDB() error {
-	// Implementation in database.go
-	return nil
+func (c Config) MarshalJSON() ([]byte, error) {
+    type Alias Config
+    return json.Marshal(&struct {
+        UpdateInterval string `json:"update_interval"`
+        Alias
+    }{
+        UpdateInterval: c.UpdateInterval.String(),
+        Alias:         Alias(c),
+    })
 }
