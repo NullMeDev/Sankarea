@@ -823,7 +823,7 @@ document.addEventListener('DOMContentLoaded', function() {
         const nextUpdate = document.getElementById('next-update');
         if (nextUpdate.dataset.time) {
             const timeUntil = Math.floor((new Date(nextUpdate.dataset.time).getTime() - Date.now()) / 1000);
-            nextUpdate.textContent = timeUntil > 0 ? `in ${formatDuration(timeUntil)}` : 'now';
+            nextUpdate.textContent = timeUntil > 0 ? "in " + formatDuration(timeUntil) : "now";
         }
     }
     
