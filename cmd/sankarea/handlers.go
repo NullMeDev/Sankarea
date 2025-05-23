@@ -140,11 +140,10 @@ func stringPtr(s string) *string {
 	return &s
 }
 
-// handlePingCommand responds to the ping command
+// handlePingCommand responds with latency and uptime
 func handlePingCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	startTime := time.Now()
-	
-	// Calculate uptime
+
 	state, err := LoadState()
 	if err != nil {
 		respondWithError(s, i, "Failed to load state")
@@ -157,9 +156,10 @@ func handlePingCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
-			Content: fmt.Sprintf("🏓 Pong! Latency: %dms | Uptime: %s", 
+			Content: fmt.Sprintf("🏓 Pong! Latency: %dms | Uptime: %s",
 				time.Since(startTime).Milliseconds(),
-				FormatDuration(uptime)),
+				FormatDuration(uptime),
+			),
 		},
 	})
 }
@@ -199,3 +199,11 @@ func handleStatusCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	statusMessage.WriteString(fmt.Sprintf("📊 **General**\n"))
 	statusMessage.WriteString(fmt.Sprintf("• Version: %s\n", cfg.Version))
 	statusMessage.WriteString(fmt.Sprintf("• Uptime: %s\n", FormatDuration(time.Since(state.StartupTime))))
+	statusMessage.WriteString(fmt.Sprintf("• Active Sources: %d\n", activeSources))
+	statusMessage.WriteString(fmt.Sprintf("• Total Articles: %d\n", totalArticles))
+
+	// Send the status message
+	s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+		Content: statusMessage.String(),
+	})
+}
