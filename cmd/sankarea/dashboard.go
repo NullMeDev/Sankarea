@@ -7,223 +7,167 @@ import (
     "fmt"
     "html/template"
     "net/http"
-    "path"
     "sync"
     "time"
 )
 
 //go:embed templates/*
-var templateFS embed.FS
+var dashboardTemplates embed.FS
 
-// DashboardServer handles the web dashboard
-type DashboardServer struct {
+// Dashboard handles the web interface for monitoring
+type Dashboard struct {
+    server     *http.Server
+    mutex      sync.RWMutex
     templates  *template.Template
-    mux       *http.ServeMux
-    mutex     sync.RWMutex
-    server    *http.Server
+    metrics    *Metrics
+    lastUpdate time.Time
 }
 
-// NewDashboardServer creates a new dashboard server instance
-func NewDashboardServer() *DashboardServer {
-    return &DashboardServer{
-        mux: http.NewServeMux(),
-    }
+// DashboardData represents the data passed to dashboard templates
+type DashboardData struct {
+    Metrics      *Metrics
+    Version      string
+    BuildDate    string
+    BuildTime    string
+    LastUpdate   string
+    HealthStatus string
 }
 
-// Initialize sets up the dashboard server
-func (ds *DashboardServer) Initialize() error {
-    // Load templates
+var (
+    dashboard     *Dashboard
+    dashboardOnce sync.Once
+)
+
+// initDashboard initializes the dashboard server
+func initDashboard() error {
     var err error
-    ds.templates, err = template.ParseFS(templateFS, "templates/*.html")
-    if err != nil {
-        return fmt.Errorf("failed to parse templates: %v", err)
-    }
-
-    // Set up middleware
-    ds.setupRoutes()
-
-    // Configure server
-    ds.server = &http.Server{
-        Addr:         fmt.Sprintf(":%d", cfg.DashboardPort),
-        Handler:      ds.loggingMiddleware(ds.mux),
-        ReadTimeout:  15 * time.Second,
-        WriteTimeout: 15 * time.Second,
-        IdleTimeout:  60 * time.Second,
-    }
-
-    return nil
-}
-
-// Start begins serving the dashboard
-func (ds *DashboardServer) Start() error {
-    go func() {
-        Logger().Printf("Starting dashboard server on port %d", cfg.DashboardPort)
-        if err := ds.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-            Logger().Printf("Dashboard server error: %v", err)
+    dashboardOnce.Do(func() {
+        // Parse templates
+        tmpl, err := template.ParseFS(dashboardTemplates, "templates/*.html")
+        if err != nil {
+            err = fmt.Errorf("failed to parse dashboard templates: %v", err)
+            return
         }
-    }()
+
+        dashboard = &Dashboard{
+            templates: tmpl,
+            metrics:   GetCurrentMetrics(),
+        }
+
+        // Initialize HTTP server
+        mux := http.NewServeMux()
+        mux.HandleFunc("/", dashboard.handleIndex)
+        mux.HandleFunc("/api/metrics", dashboard.handleMetrics)
+        mux.HandleFunc("/api/sources", dashboard.handleSources)
+        mux.HandleFunc("/api/health", dashboard.handleHealth)
+
+        dashboard.server = &http.Server{
+            Addr:         fmt.Sprintf(":%d", cfg.DashboardPort),
+            Handler:      mux,
+            ReadTimeout:  10 * time.Second,
+            WriteTimeout: 10 * time.Second,
+        }
+    })
+    return err
+}
+
+// Start starts the dashboard server
+func (d *Dashboard) Start() error {
+    Logger().Printf("Starting dashboard on port %d", cfg.DashboardPort)
+    return d.server.ListenAndServe()
+}
+
+// Stop gracefully stops the dashboard server
+func (d *Dashboard) Stop() error {
+    return d.server.Close()
+}
+
+// UpdateMetrics updates the dashboard metrics
+func (d *Dashboard) UpdateMetrics(metrics *Metrics) error {
+    d.mutex.Lock()
+    defer d.mutex.Unlock()
+
+    d.metrics = metrics
+    d.lastUpdate = time.Now()
     return nil
 }
 
-// setupRoutes configures all dashboard routes
-func (ds *DashboardServer) setupRoutes() {
-    // Static file handler
-    ds.mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(templateFS))))
+// HTTP Handlers
 
-    // API routes
-    ds.mux.HandleFunc("/api/status", ds.handleAPIStatus)
-    ds.mux.HandleFunc("/api/sources", ds.handleAPISources)
-    ds.mux.HandleFunc("/api/articles", ds.handleAPIArticles)
-    ds.mux.HandleFunc("/api/metrics", ds.handleAPIMetrics)
-    ds.mux.HandleFunc("/api/health", ds.handleAPIHealth)
-    ds.mux.HandleFunc("/api/config", ds.handleAPIConfig)
-
-    // Page routes
-    ds.mux.HandleFunc("/", ds.handleHome)
-    ds.mux.HandleFunc("/logs", ds.handleLogs)
-    ds.mux.HandleFunc("/sources", ds.handleSources)
-    ds.mux.HandleFunc("/articles", ds.handleArticles)
-    ds.mux.HandleFunc("/settings", ds.handleSettings)
-}
-
-// Middleware for logging requests
-func (ds *DashboardServer) loggingMiddleware(next http.Handler) http.Handler {
-    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        start := time.Now()
-        next.ServeHTTP(w, r)
-        Logger().Printf("%s %s %s", r.Method, r.RequestURI, time.Since(start))
-    })
-}
-
-// Page handlers
-func (ds *DashboardServer) handleHome(w http.ResponseWriter, r *http.Request) {
-    if r.URL.Path != "/" {
-        http.NotFound(w, r)
-        return
+func (d *Dashboard) handleIndex(w http.ResponseWriter, r *http.Request) {
+    d.mutex.RLock()
+    data := DashboardData{
+        Metrics:      d.metrics,
+        Version:      botVersion,
+        BuildDate:    buildDate,
+        BuildTime:    buildTime,
+        LastUpdate:   d.lastUpdate.Format(time.RFC3339),
+        HealthStatus: getHealthStatus(),
     }
-    ds.renderTemplate(w, "dashboard.html", ds.getDashboardData())
-}
+    d.mutex.RUnlock()
 
-func (ds *DashboardServer) handleLogs(w http.ResponseWriter, r *http.Request) {
-    ds.renderTemplate(w, "logs.html", ds.getDashboardData())
-}
-
-func (ds *DashboardServer) handleSources(w http.ResponseWriter, r *http.Request) {
-    ds.renderTemplate(w, "sources.html", ds.getDashboardData())
-}
-
-func (ds *DashboardServer) handleArticles(w http.ResponseWriter, r *http.Request) {
-    ds.renderTemplate(w, "articles.html", ds.getDashboardData())
-}
-
-func (ds *DashboardServer) handleSettings(w http.ResponseWriter, r *http.Request) {
-    ds.renderTemplate(w, "settings.html", ds.getDashboardData())
-}
-
-// API handlers
-func (ds *DashboardServer) handleAPIStatus(w http.ResponseWriter, r *http.Request) {
-    state := GetState()
-    
-    status := map[string]interface{}{
-        "version":       cfg.Version,
-        "status":        getStatusString(state),
-        "uptime":        FormatDuration(time.Since(state.StartupTime)),
-        "lastFetch":     state.LastFetchTime,
-        "lastDigest":    state.LastDigest,
-        "feedCount":     state.FeedCount,
-        "errorCount":    state.ErrorCount,
-        "paused":        state.Paused,
-        "pausedBy":      state.PausedBy,
-        "lockdown":      state.Lockdown,
-        "lastError":     state.LastError,
-        "lastErrorTime": state.LastErrorTime,
+    if err := d.templates.ExecuteTemplate(w, "index.html", data); err != nil {
+        http.Error(w, "Failed to render template", http.StatusInternalServerError)
+        Logger().Printf("Failed to render dashboard template: %v", err)
     }
-
-    ds.respondWithJSON(w, http.StatusOK, status)
 }
 
-func (ds *DashboardServer) handleAPISources(w http.ResponseWriter, r *http.Request) {
-    sources := loadSources()
-    ds.respondWithJSON(w, http.StatusOK, sources)
+func (d *Dashboard) handleMetrics(w http.ResponseWriter, r *http.Request) {
+    d.mutex.RLock()
+    metrics := d.metrics
+    d.mutex.RUnlock()
+
+    w.Header().Set("Content-Type", "application/json")
+    if err := json.NewEncoder(w).Encode(metrics); err != nil {
+        http.Error(w, "Failed to encode metrics", http.StatusInternalServerError)
+        Logger().Printf("Failed to encode metrics: %v", err)
+    }
 }
 
-func (ds *DashboardServer) handleAPIArticles(w http.ResponseWriter, r *http.Request) {
-    articles, err := getRecentArticles(20)
+func (d *Dashboard) handleSources(w http.ResponseWriter, r *http.Request) {
+    sources, err := LoadSources()
     if err != nil {
-        ds.respondWithError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to fetch articles: %v", err))
-        return
-    }
-    ds.respondWithJSON(w, http.StatusOK, articles)
-}
-
-func (ds *DashboardServer) handleAPIMetrics(w http.ResponseWriter, r *http.Request) {
-    metrics := collectMetrics()
-    ds.respondWithJSON(w, http.StatusOK, metrics)
-}
-
-func (ds *DashboardServer) handleAPIHealth(w http.ResponseWriter, r *http.Request) {
-    health := healthMonitor.GetHealthStatus()
-    ds.respondWithJSON(w, http.StatusOK, health)
-}
-
-func (ds *DashboardServer) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
-    ds.respondWithJSON(w, http.StatusOK, ds.getSafeConfig())
-}
-
-// Helper methods
-func (ds *DashboardServer) renderTemplate(w http.ResponseWriter, tmpl string, data interface{}) {
-    ds.mutex.RLock()
-    defer ds.mutex.RUnlock()
-
-    if err := ds.templates.ExecuteTemplate(w, tmpl, data); err != nil {
-        http.Error(w, fmt.Sprintf("Failed to render template: %v", err), http.StatusInternalServerError)
-    }
-}
-
-func (ds *DashboardServer) respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
-    response, err := json.Marshal(payload)
-    if err != nil {
-        http.Error(w, "Failed to marshal JSON response", http.StatusInternalServerError)
+        http.Error(w, "Failed to load sources", http.StatusInternalServerError)
+        Logger().Printf("Failed to load sources: %v", err)
         return
     }
 
     w.Header().Set("Content-Type", "application/json")
-    w.WriteHeader(code)
-    w.Write(response)
-}
-
-func (ds *DashboardServer) respondWithError(w http.ResponseWriter, code int, message string) {
-    ds.respondWithJSON(w, code, map[string]string{"error": message})
-}
-
-func (ds *DashboardServer) getDashboardData() map[string]interface{} {
-    state := GetState()
-    
-    return map[string]interface{}{
-        "Version":        cfg.Version,
-        "Uptime":        FormatDuration(time.Since(state.StartupTime)),
-        "Status":        getStatusString(state),
-        "Sources":       loadSources(),
-        "RecentArticles": getRecentArticlesDigest(),
-        "Stats":         getSystemStats(),
-        "Metrics":       collectMetrics(),
-        "Errors":        healthMonitor.GetRecentErrors(10),
-        "Config":        ds.getSafeConfig(),
+    if err := json.NewEncoder(w).Encode(sources); err != nil {
+        http.Error(w, "Failed to encode sources", http.StatusInternalServerError)
+        Logger().Printf("Failed to encode sources: %v", err)
     }
 }
 
-func (ds *DashboardServer) getSafeConfig() map[string]interface{} {
-    return map[string]interface{}{
-        "version":               cfg.Version,
-        "newsIntervalMinutes":   cfg.NewsIntervalMinutes,
-        "maxPostsPerSource":     cfg.MaxPostsPerSource,
-        "enableImageEmbed":      cfg.EnableImageEmbed,
-        "enableFactCheck":       cfg.EnableFactCheck,
-        "enableSummarization":   cfg.EnableSummarization,
-        "enableContentFiltering": cfg.EnableContentFiltering,
-        "enableKeywordTracking":  cfg.EnableKeywordTracking,
-        "enableDatabase":        cfg.EnableDatabase,
-        "enableDashboard":       cfg.EnableDashboard,
-        "fetchNewsOnStartup":    cfg.FetchNewsOnStartup,
+func (d *Dashboard) handleHealth(w http.ResponseWriter, r *http.Request) {
+    state, err := LoadState()
+    if err != nil {
+        http.Error(w, "Failed to load state", http.StatusInternalServerError)
+        Logger().Printf("Failed to load state: %v", err)
+        return
     }
+
+    health := struct {
+        Status    string    `json:"status"`
+        Timestamp time.Time `json:"timestamp"`
+        Uptime    string    `json:"uptime"`
+    }{
+        Status:    state.HealthStatus,
+        Timestamp: time.Now(),
+        Uptime:    time.Since(state.StartupTime).String(),
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    if err := json.NewEncoder(w).Encode(health); err != nil {
+        http.Error(w, "Failed to encode health status", http.StatusInternalServerError)
+        Logger().Printf("Failed to encode health status: %v", err)
+    }
+}
+
+func getHealthStatus() string {
+    state, err := LoadState()
+    if err != nil {
+        return StatusUnhealthy
+    }
+    return state.HealthStatus
 }
