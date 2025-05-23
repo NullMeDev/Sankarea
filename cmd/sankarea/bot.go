@@ -6,6 +6,7 @@ import (
     "fmt"
     "sync"
     "time"
+    "strings"
 
     "github.com/bwmarrin/discordgo"
 )
@@ -45,7 +46,6 @@ func NewBot(config *BotConfig) (*Bot, error) {
 
     bot := &Bot{
         discord:     discord,
-        scheduler:   NewScheduler(discord),
         database:    db,
         logger:      Logger(),
         formatter:   NewFormatter(),
@@ -53,6 +53,9 @@ func NewBot(config *BotConfig) (*Bot, error) {
         config:      config,
         startTime:   time.Now(),
     }
+
+    // Initialize scheduler with 30-minute interval
+    bot.scheduler = NewScheduler(bot, 30*time.Minute)
 
     // Initialize dashboard if enabled
     if config.DashboardEnabled {
@@ -122,95 +125,6 @@ func (b *Bot) Stop() error {
 
 // Discord event handlers
 
-func (b *Bot) handleReady(s *discordgo.Session, r *discordgo.Ready) {
-    b.logger.Info("Bot is ready! Logged in as %s#%s", r.User.Username, r.User.Discriminator)
-    
-    // Update bot status
-    err := s.UpdateGameStatus(0, "Monitoring news | /help")
-    if err != nil {
-        b.logger.Error("Failed to update status: %v", err)
-    }
-}
-
-func (b *Bot) handleMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
-    // Ignore messages from the bot itself
-    if m.Author.ID == s.State.User.ID {
-        return
-    }
-
-    // TODO: Implement message handling logic
-}
-
-func (b *Bot) handleInteractionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
-    // Handle slash commands
-    if i.Type == discordgo.InteractionApplicationCommand {
-        if err := b.handleCommand(s, i); err != nil {
-            b.logger.Error("Command error: %v", err)
-            // Send error response to user
-            s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-                Type: discordgo.InteractionResponseChannelMessageWithSource,
-                Data: &discordgo.InteractionResponseData{
-                    Content: fmt.Sprintf("❌ Error: %v", err),
-                    Flags:   discordgo.MessageFlagsEphemeral,
-                },
-            })
-        }
-    }
-}
-
-// handleCommand processes slash commands
-func (b *Bot) handleCommand(s *discordgo.Session, i *discordgo.InteractionCreate) error {
-    // Check permissions
-    if !CheckCommandPermissions(s, i) {
-        return fmt.Errorf("you don't have permission to use this command")
-    }
-
-    // Get command data
-    data := i.ApplicationCommandData()
-
-    // Handle different commands
-    switch data.Name {
-    case "ping":
-        return b.handlePingCommand(s, i)
-    case "news":
-        return b.handleNewsCommand(s, i)
-    case "digest":
-        return b.handleDigestCommand(s, i)
-    default:
-        return fmt.Errorf("unknown command: %s", data.Name)
-    }
-}
-
-// Command handlers
-
-func (b *Bot) handlePingCommand(s *discordgo.Session, i *discordgo.InteractionCreate) error {
-    latency := time.Since(b.startTime)
-    return s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-        Type: discordgo.InteractionResponseChannelMessageWithSource,
-        Data: &discordgo.InteractionResponseData{
-            Content: fmt.Sprintf("🏓 Pong! Latency: %s", latency.Round(time.Millisecond)),
-        },
-    })
-}
-
-func (b *Bot) handleNewsCommand(s *discordgo.Session, i *discordgo.InteractionCreate) error {
-    // TODO: Implement news command
-    return nil
-}
-
-func (b *Bot) handleDigestCommand(s *discordgo.Session, i *discordgo.InteractionCreate) error {
-    // TODO: Implement digest command
-    return nil
-}
-
-// Utility methods
-
-func (b *Bot) GetUptime() time.Duration {
-    return time.Since(b.startTime)
-}
-
-// Discord event handlers
-
 // handleReady handles the ready event when the bot connects to Discord
 func (b *Bot) handleReady(s *discordgo.Session, r *discordgo.Ready) {
     b.logger.Info("Bot is ready! Logged in as %s#%s", s.State.User.Username, s.State.User.Discriminator)
@@ -261,7 +175,6 @@ func (b *Bot) handleMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 
 // handleInteractionCreate handles slash command interactions
 func (b *Bot) handleInteractionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
-    // Handle different interaction types
     switch i.Type {
     case discordgo.InteractionApplicationCommand:
         b.handleSlashCommand(s, i)
@@ -419,10 +332,8 @@ func (b *Bot) handleRefreshCommand(s *discordgo.Session, m *discordgo.MessageCre
 }
 
 func (b *Bot) handleSlashCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
-    // Get command name
     cmd := i.ApplicationCommandData().Name
 
-    // Handle different commands
     switch cmd {
     case "sources":
         b.handleSourcesSlashCommand(s, i)
@@ -439,8 +350,6 @@ func (b *Bot) handleSlashCommand(s *discordgo.Session, i *discordgo.InteractionC
 }
 
 func (b *Bot) handleMessageComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
-    // Handle button clicks or select menus
-    // This can be expanded later if needed
     s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
         Type: discordgo.InteractionResponseChannelMessageWithSource,
         Data: &discordgo.InteractionResponseData{
