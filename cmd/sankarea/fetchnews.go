@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -209,8 +210,9 @@ func extractImageURL(content string) string {
 
 // sortArticlesByDate sorts articles by published date (newest first)
 func sortArticlesByDate(articles []*Article) {
-	// Sort by published date (newest first)
-	// This would use sort.Slice in a real implementation
+	sort.Slice(articles, func(i, j int) bool {
+		return articles[i].Published.After(articles[j].Published)
+	})
 }
 
 // postArticleToDiscord posts an article to a Discord channel
@@ -264,23 +266,11 @@ func truncateDescription(s string, maxLength int) string {
 	s = strings.ReplaceAll(s, "<br/>", "\n")
 	s = strings.ReplaceAll(s, "<br />", "\n")
 	
-	// Simple regex for removing HTML tags would be used here
-	// For brevity, we'll just use a placeholder implementation
-	for strings.Contains(s, "<") && strings.Contains(s, ">") {
-		start := strings.Index(s, "<")
-		end := strings.Index(s, ">")
-		if end > start {
-			s = s[:start] + s[end+1:]
-		} else {
-			break
-		}
-	}
+	// Use SanitizeHTML for proper HTML removal
+	s = SanitizeHTML(s)
 	
 	// Truncate if needed
-	if len(s) > maxLength {
-		return s[:maxLength-3] + "..."
-	}
-	return s
+	return TruncateString(s, maxLength)
 }
 
 // getColorForCategory returns a color code based on the category
@@ -312,9 +302,28 @@ func updateSourceWithError(source Source, err error) {
 	source.LastErrorTime = time.Now()
 	source.ErrorCount++
 	
-	// Save sources
-	// In a real implementation, we would need to get all sources,
-	// update this one, and then save them all
+	// Load all sources, update this one, and save
+	sources, loadErr := LoadSources()
+	if loadErr != nil {
+		Logger().Printf("Failed to load sources for error update: %v", loadErr)
+		return
+	}
+	
+	// Find and update this source
+	for i, src := range sources {
+		if src.Name == source.Name {
+			source.FeedCount = src.FeedCount
+			source.UptimePercent = src.UptimePercent
+			source.AvgResponseTime = src.AvgResponseTime
+			sources[i] = source
+			break
+		}
+	}
+	
+	// Save updated sources
+	if saveErr := SaveSources(sources); saveErr != nil {
+		Logger().Printf("Failed to save sources after error update: %v", saveErr)
+	}
 }
 
 // updateSourceMetrics updates metrics for a source
@@ -336,9 +345,25 @@ func updateSourceMetrics(source Source, startTime time.Time, articleCount int, e
 		source.UptimePercent = source.UptimePercent * 0.9 // Decrease uptime
 	}
 	
-	// Save sources
-	// In a real implementation, we would need to get all sources,
-	// update this one, and then save them all
+	// Load all sources, update this one, and save
+	sources, loadErr := LoadSources()
+	if loadErr != nil {
+		Logger().Printf("Failed to load sources for metrics update: %v", loadErr)
+		return
+	}
+	
+	// Find and update this source
+	for i, src := range sources {
+		if src.Name == source.Name {
+			sources[i] = source
+			break
+		}
+	}
+	
+	// Save updated sources
+	if saveErr := SaveSources(sources); saveErr != nil {
+		Logger().Printf("Failed to save sources after metrics update: %v", saveErr)
+	}
 	
 	// Update global article count
 	UpdateTotalArticles(articleCount)
@@ -410,7 +435,7 @@ func handleStatusCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	
 	content := fmt.Sprintf("**Status:** %s\n", status["status"])
 	content += fmt.Sprintf("**Version:** %s\n", status["version"])
-	content += fmt.Sprintf("**Uptime:** %s\n", formatDuration(uptime))
+	content += fmt.Sprintf("**Uptime:** %s\n", FormatDuration(uptime))
 	content += fmt.Sprintf("**Feed Count:** %d\n", status["feed_count"])
 	content += fmt.Sprintf("**Digest Count:** %d\n", status["digest_count"])
 	content += fmt.Sprintf("**Error Count:** %d\n", status["error_count"])
@@ -424,59 +449,188 @@ func handleStatusCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 }
 
 func handleSourceCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	// Implementation omitted for brevity
+	// Get subcommand
+	options := i.ApplicationCommandData().Options
+	if len(options) == 0 {
+		respondWithError(s, i, "Missing subcommand")
+		return
+	}
+	
+	subcommand := options[0].Name
+	
+	switch subcommand {
+	case "list":
+		handleSourceList(s, i)
+	case "add":
+		handleSourceAdd(s, i, options[0])
+	case "remove":
+		handleSourceRemove(s, i, options[0])
+	case "info":
+		handleSourceInfo(s, i, options[0])
+	default:
+		respondWithError(s, i, "Unknown subcommand")
+	}
 }
 
 func handleAdminCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	// Implementation omitted for brevity
+	// Check if user has admin permissions
+	if !IsAdmin(i.Member.User.ID) {
+		respondWithError(s, i, "You don't have permission to use admin commands")
+		return
+	}
+	
+	// Get subcommand
+	options := i.ApplicationCommandData().Options
+	if len(options) == 0 {
+		respondWithError(s, i, "Missing subcommand")
+		return
+	}
+	
+	subcommand := options[0].Name
+	
+	switch subcommand {
+	case "pause":
+		handleAdminPause(s, i)
+	case "resume":
+		handleAdminResume(s, i)
+	case "refresh":
+		handleAdminRefresh(s, i)
+	default:
+		respondWithError(s, i, "Unknown subcommand")
+	}
 }
 
 func handleFactCheckCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	// Implementation omitted for brevity
+	// Implementation for fact check command
+	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Content: "Fact check feature is coming soon!",
+		},
+	})
 }
 
 func handleSummarizeCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	// Implementation omitted for brevity
+	// Implementation for summarize command
+	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Content: "Summarize feature is coming soon!",
+		},
+	})
 }
 
 func handleHelpCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	// Implementation omitted for brevity
+	helpText := `**Sankarea Bot Commands**
+	
+**/ping** - Check if the bot is online
+**/status** - Shows the current status of the bot
+**/version** - Shows the current version of the bot
+**/source** - Manage RSS sources
+**/admin** - Admin commands
+**/factcheck** - Fact check a claim or article
+**/summarize** - Summarize an article
+**/filter** - Set your news filtering preferences
+**/digest** - Generate and customize news digests
+**/track** - Track keywords in news articles
+**/language** - Change your language settings
+**/help** - Shows this help information
+	
+For more detailed help, use /help [command]`
+	
+	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Content: helpText,
+		},
+	})
 }
 
 func handleFilterCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	// Implementation omitted for brevity
+	// Implementation for filter command
+	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Content: "Filter feature is coming soon!",
+		},
+	})
 }
 
 func handleDigestCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	// Implementation omitted for brevity
+	// Implementation for digest command
+	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Content: "Digest feature is coming soon!",
+		},
+	})
 }
 
 func handleTrackCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	// Implementation omitted for brevity
+	// Implementation for track command
+	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Content: "Tracking feature is coming soon!",
+		},
+	})
 }
 
 func handleLanguageCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	// Implementation omitted for brevity
+	// Implementation for language command
+	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Content: "Language feature is coming soon!",
+		},
+	})
 }
 
 func handleVersionCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
-			Content: fmt.Sprintf("Sankarea Bot v%s by NullMeDev", VERSION),
+			Content: fmt.Sprintf("Sankarea Bot v%s by NullMeDevok", VERSION),
 		},
 	})
 }
 
-// formatDuration formats a duration in a human-readable format
-func formatDuration(d time.Duration) string {
-	days := int(d.Hours() / 24)
-	hours := int(d.Hours()) % 24
-	minutes := int(d.Minutes()) % 60
-	seconds := int(d.Seconds()) % 60
-	
-	if days > 0 {
-		return fmt.Sprintf("%dd %dh %dm %ds", days, hours, minutes, seconds)
-	}
-	if hours > 0 {
-		return fmt.Sprintf("%dh
+// Helper functions for source commands
+func handleSourceList(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	// Implementation for source list
+}
+
+func handleSourceAdd(s *discordgo.Session, i *discordgo.InteractionCreate, option *discordgo.ApplicationCommandInteractionDataOption) {
+	// Implementation for source add
+}
+
+func handleSourceRemove(s *discordgo.Session, i *discordgo.InteractionCreate, option *discordgo.ApplicationCommandInteractionDataOption) {
+	// Implementation for source remove
+}
+
+func handleSourceInfo(s *discordgo.Session, i *discordgo.InteractionCreate, option *discordgo.ApplicationCommandInteractionDataOption) {
+	// Implementation for source info
+}
+
+// Helper functions for admin commands
+func handleAdminPause(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	// Implementation for admin pause
+}
+
+func handleAdminResume(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	// Implementation for admin resume
+}
+
+func handleAdminRefresh(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	// Implementation for admin refresh
+}
+
+// Helper function to respond with an error
+func respondWithError(s *discordgo.Session, i *discordgo.InteractionCreate, message string) {
+	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Content: "⚠️ " + message,
+		},
+	})
+}
